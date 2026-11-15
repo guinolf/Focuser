@@ -46,4 +46,19 @@ describe("ConfirmButton", () => {
 
     expect(screen.getByRole("button")).toHaveTextContent("Really?");
   });
+
+  it("shows confirmation icon when size is icon", async () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmButton size="icon" onConfirm={onConfirm} confirmLabel="Confirm delete">
+        <span>Trash</span>
+      </ConfirmButton>,
+    );
+
+    const button = screen.getByRole("button");
+    await userEvent.click(button);
+    expect(button).toHaveAttribute("aria-label", "Confirm delete");
+    await userEvent.click(button);
+    expect(onConfirm).toHaveBeenCalledOnce();
+  });
 });

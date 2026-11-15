@@ -170,7 +170,7 @@ Focuser/
 │   ├── focuser-common/    # Shared types, errors, process control, icon extraction
 │   ├── focuser-core/      # Database, rules engine, blocking logic
 │   ├── focuser-app/       # Command core — every action the app can perform
-│   ├── focuser-native/    # Native messaging host (extension bridge)
+│   ├── focuser-native/    # Legacy native messaging host (optional bridge)
 │   ├── focuser-cli/       # Command-line interface
 │   ├── focuser-devserver/ # Dev-only HTTP bridge, for running the UI in a browser
 │   └── focuser-ui/        # Tauri desktop app
@@ -186,7 +186,7 @@ Focuser/
 2. **Process monitoring** - A background thread scans running processes and closes any that match your app blocking rules. On Windows it first asks the app to close, as clicking X would, so an editor can offer to save. Only an app still open 30 seconds later is closed by force.
 3. **Browser extension** - Catches navigation to blocked URLs and replaces the page with a block screen. Handles keyword, wildcard, and URL-path rules the hosts file can't.
 4. **Browser enforcement** - Detects browsers running without the Focuser extension. After a grace period, it closes the browser and prompts you to install it.
-5. **Local API** - The app runs an HTTP API on `127.0.0.1:17549` that the extension polls for rule updates. Everything stays local.
+5. **Local REST API** - The app runs an HTTP REST service on `127.0.0.1:17549` that the extension polls for rules and reports attempts. All traffic is strictly local to loopback.
 6. **Pomodoro + allowance overlay** - Pomodoro toggles a block list at each work/break boundary. Allowances track per-domain time from tab activity reported by the extension, and inject themselves as exceptions until the daily quota runs out — at which point the domain flips back into the blocked set until midnight.
 
 One rule worth knowing: `youtube.com`, `www.youtube.com` and `m.youtube.com` are the same site everywhere in Focuser. Hostnames are canonicalised in exactly one place (`focuser_common::host`) and every rule, exception and allowance goes through it, so a block or an allowance can't apply to one form and miss another.

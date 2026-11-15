@@ -471,11 +471,14 @@ impl Database {
     }
 
     /// Delete EVERYTHING: block lists, rules, schedules, exceptions,
-    /// statistics, blocked events, settings. Full reset.
+    /// statistics, blocked events, settings, pomodoro sessions and allowances. Full reset.
     pub fn delete_all_data(&self) -> Result<()> {
-        let conn = self
+        let mut conn = self
             .conn
             .lock()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+        let tx = conn
+            .transaction()
             .map_err(|e| FocuserError::Database(e.to_string()))?;
         for table in [
             "statistics",
@@ -486,9 +489,16 @@ impl Database {
             "unlock_challenges",
             "shared_allowance_usage",
             "shared_allowance_occurrences",
+            "pomodoro_phases",
+            "pomodoro_sessions",
+            "allowance_usage",
+            "allowances",
         ] {
-            let _ = conn.execute(&format!("DELETE FROM {table}"), []);
+            tx.execute(&format!("DELETE FROM {table}"), [])
+                .map_err(|e| FocuserError::Database(e.to_string()))?;
         }
+        tx.commit()
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
         Ok(())
     }
 

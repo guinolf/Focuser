@@ -4,6 +4,7 @@ import type { AllowanceStatus } from "@/bindings";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, EmptyState, PageHeader } from "@/components/ui/card";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import { InlineError, QueryState } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
 import { NumberField } from "@/components/ui/number-field";
@@ -174,7 +175,13 @@ export function Allowances() {
         ) : (
           <ul className="flex flex-col gap-2">
             {allowances.data?.map((status) => (
-              <AllowanceRow key={status.allowance.id} status={status} locked={locked} />
+              <AllowanceRow
+                key={status.allowance.id}
+                status={status}
+                locked={locked}
+                extensionConnected={extensionConnected}
+                appUsageMeasurable={health.data?.app_usage_measurable !== false}
+              />
             ))}
           </ul>
         )}
@@ -183,14 +190,26 @@ export function Allowances() {
   );
 }
 
-function AllowanceRow({ status, locked }: { status: AllowanceStatus; locked: boolean }) {
+function AllowanceRow({
+  status,
+  locked,
+  extensionConnected,
+  appUsageMeasurable,
+}: {
+  status: AllowanceStatus;
+  locked: boolean;
+  extensionConnected: boolean;
+  appUsageMeasurable: boolean;
+}) {
   const update = useUpdateAllowance();
   const reset = useResetAllowanceToday();
   const remove = useDeleteAllowance();
 
   const { allowance: a, used_today_secs: used, remaining_secs: left, exhausted } = status;
   const ratio = a.daily_limit_secs > 0 ? used / a.daily_limit_secs : 0;
-
+  const timingBlind =
+    (a.target.kind === "Domain" && !extensionConnected) ||
+    (a.target.kind === "AppExecutable" && !appUsageMeasurable);
   // Only the field being edited changes; the rest is sent back as-is.
   const save = (
     patch: Partial<{ dailyLimitSecs: number; strictMode: boolean; enabled: boolean }>,
@@ -212,6 +231,13 @@ function AllowanceRow({ status, locked }: { status: AllowanceStatus; locked: boo
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <p className="truncate font-medium text-foreground text-sm">{a.target.value}</p>
+                {timingBlind && (
+                  <Badge tone="warning">
+                    {a.target.kind === "Domain"
+                      ? m.allowances_extension_needed_title()
+                      : m.allowances_wayland_title()}
+                  </Badge>
+                )}
                 {exhausted && <Badge tone="destructive">{m.allowances_badge_spent()}</Badge>}
                 {!a.enabled && <Badge tone="neutral">{m.allowances_badge_paused()}</Badge>}
               </div>
@@ -251,15 +277,17 @@ function AllowanceRow({ status, locked }: { status: AllowanceStatus; locked: boo
                 <RotateCcw />
               </Button>
             </Tooltip>
-            <Button
+            <ConfirmButton
               variant="ghost"
               tone="destructive"
               size="icon"
+              confirmLabel={m.config_confirm_delete()}
               aria-label={m.allowances_delete_for({ target: a.target.value })}
-              onClick={() => remove.mutate(a.id)}
+              disabled={locked || remove.isPending}
+              onConfirm={() => remove.mutate(a.id)}
             >
               <Trash2 />
-            </Button>
+            </ConfirmButton>
           </div>
         </div>
 
@@ -270,9 +298,13 @@ function AllowanceRow({ status, locked }: { status: AllowanceStatus; locked: boo
           label={m.allowances_usage_for({ target: a.target.value })}
         />
         <p id={`allowance-${a.id}-usage`} className="mt-1.5 text-faint-foreground text-xs">
-          {exhausted
-            ? m.allowances_used_all({ limit: formatDuration(a.daily_limit_secs) })
-            : m.allowances_used_left({ used: formatDuration(used), left: formatDuration(left) })}
+          {timingBlind
+            ? a.target.kind === "Domain"
+              ? m.allowances_extension_needed_body()
+              : m.allowances_wayland_body()
+            : exhausted
+              ? m.allowances_used_all({ limit: formatDuration(a.daily_limit_secs) })
+              : m.allowances_used_left({ used: formatDuration(used), left: formatDuration(left) })}
         </p>
 
         <InlineError error={update.error ?? reset.error ?? remove.error} />

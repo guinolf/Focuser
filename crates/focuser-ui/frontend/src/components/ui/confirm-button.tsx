@@ -1,3 +1,4 @@
+import { Check } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button, type ButtonProps } from "./button";
 
@@ -25,17 +26,22 @@ export function ConfirmButton({
     return () => clearTimeout(timer);
   }, [armed]);
 
+  const isIcon = props.size === "icon";
+
   return (
     <Button
       {...props}
       tone="destructive"
+      variant={armed ? "solid" : props.variant}
+      aria-label={armed ? confirmLabel : props["aria-label"]}
+      title={armed ? confirmLabel : props.title}
       onClick={() => {
         if (armed) onConfirm();
         setArmed(!armed);
       }}
       onBlur={() => setArmed(false)}
     >
-      {armed ? confirmLabel : children}
+      {armed ? (isIcon ? <Check aria-hidden className="size-4 animate-pulse text-white" /> : confirmLabel) : children}
     </Button>
   );
 }

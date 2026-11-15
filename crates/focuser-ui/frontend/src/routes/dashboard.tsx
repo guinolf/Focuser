@@ -160,6 +160,7 @@ export function Dashboard() {
                     <Switch
                       checked={list.enabled}
                       onCheckedChange={(next) => toggle.mutate({ id: list.id, enabled: next })}
+                      disabled={toggle.isPending && toggle.variables?.id === list.id}
                       aria-label={m.dashboard_enable_list({ name: list.name })}
                     />
                   )}

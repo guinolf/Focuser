@@ -958,7 +958,7 @@ fn api_allowance_tick(body: &str, state: &AppState) -> (&'static str, String) {
     let tick: focuser_common::allowance::AllowanceTick = match serde_json::from_str(body) {
         Ok(t) => t,
         Err(e) => {
-            tracing::debug!(error = %e, body = %body, "bad allowance-tick payload");
+            tracing::debug!(error = %e, body_len = body.len(), "bad allowance-tick payload");
             return ("400 Bad Request", format!(r#"{{"error":"{e}"}}"#));
         }
     };
@@ -1379,6 +1379,14 @@ mod tests {
         let eng = state.engine.lock().unwrap();
         assert_eq!(eng.check_domain("youtube.com"), Some("Shared"));
         assert!(eng.db().allowance_statuses_with_shared().unwrap()[0].paused_by_shared);
+    }
+
+    #[test]
+    fn bad_allowance_tick_returns_400() {
+        let state = ctx_with_extension(|_| {});
+        let result = super::api_allowance_tick("not valid json", &state);
+        assert_eq!(result.0, "400 Bad Request");
+        assert!(result.1.contains("error"));
     }
 
     #[test]

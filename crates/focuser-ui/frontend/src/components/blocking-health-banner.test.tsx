@@ -75,6 +75,12 @@ describe("BlockingHealthBanner", () => {
     expect(banner()).toBeNull();
   });
 
+  it("warns when extension-only rules are active but extension is disconnected even with hosts writable", () => {
+    health({ hosts_writable: true, extension_only_rules: true, extension_connected: false });
+    render(<BlockingHealthBanner />);
+    expect(banner()).not.toBeNull();
+  });
+
   it("stays quiet when nothing is meant to be blocked", () => {
     // No active lists means no broken promise, so a warning here would just
     // train the user to ignore the banner.

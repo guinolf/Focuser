@@ -189,6 +189,7 @@ const Cell = memo(function Cell({
   onEnter: (key: CellKey) => void;
 }) {
   const key = cellKey(day, hour);
+  const lastPointerTime = useRef(0);
 
   return (
     <td className={cn("p-0", hour % 6 === 0 && hour !== 0 && "border-border/70 border-l")}>
@@ -199,12 +200,25 @@ const Cell = memo(function Cell({
         disabled={disabled}
         onPointerDown={(e) => {
           // Keeps the gesture alive when the pointer leaves this cell.
+          lastPointerTime.current = Date.now();
           e.preventDefault();
           onStart(key);
         }}
         onPointerEnter={() => onEnter(key)}
+        onKeyDown={(e) => {
+          if (disabled) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onStart(key);
+          }
+        }}
+        onClick={() => {
+          if (disabled) return;
+          // Ignore duplicate clicks generated immediately after pointerdown
+          if (Date.now() - lastPointerTime.current < 400) return;
+          onStart(key);
+        }}
         className={cn(
-          "block h-11 w-full rounded-md transition-colors duration-100",
           "focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-ring",
           on
             ? "bg-primary shadow-(--shadow-depth-sm) hover:bg-primary-hover"

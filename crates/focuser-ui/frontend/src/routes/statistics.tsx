@@ -77,7 +77,8 @@ export function Statistics() {
           />
           <Stat
             label={m.statistics_time_recorded()}
-            value={formatDuration(totals.seconds)}
+            value={totals.seconds > 0 ? formatDuration(totals.seconds) : "—"}
+            hint={totals.seconds === 0 ? m.statistics_chart_empty_title() : undefined}
             icon={<Clock aria-hidden className="size-3.5" />}
           />
           <Stat

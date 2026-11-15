@@ -369,12 +369,23 @@ pub struct BlockingHealth {
 }
 
 impl BlockingHealth {
-    /// True when the user expects blocking but neither mechanism can deliver.
-    ///
-    /// The extension alone is enough, and a writable hosts file alone is
-    /// enough. Only losing both is a failure worth interrupting anyone over.
+    /// True when the user expects blocking but neither mechanism can deliver,
+    /// or when extension-only rules (keywords, wildcards, URL paths) are active
+    /// without a connected extension.
     pub fn is_failing(&self) -> bool {
+        self.active_lists > 0
+            && ((!self.extension_connected && !self.hosts_writable)
+                || (self.extension_only_rules && !self.extension_connected))
+    }
+
+    /// True when neither mechanism can deliver basic domain blocking.
+    pub fn is_total_failure(&self) -> bool {
         self.active_lists > 0 && !self.extension_connected && !self.hosts_writable
+    }
+
+    /// True when rules that require the browser extension cannot be enforced.
+    pub fn is_partial_failure(&self) -> bool {
+        self.active_lists > 0 && self.extension_only_rules && !self.extension_connected
     }
 }
 
@@ -567,5 +578,22 @@ mod health_tests {
         // No active lists means no promise to keep, so a hosts file we cannot
         // write is not worth warning anyone about.
         assert!(!health(0, false, false).is_failing());
+    }
+
+    #[test]
+    fn extension_only_rules_without_extension_is_a_failure_even_if_hosts_writable() {
+        let mut h = health(1, false, true);
+        h.extension_only_rules = true;
+        assert!(h.is_failing());
+        assert!(h.is_partial_failure());
+        assert!(!h.is_total_failure());
+    }
+
+    #[test]
+    fn extension_only_rules_with_extension_is_not_a_failure() {
+        let mut h = health(1, true, false);
+        h.extension_only_rules = true;
+        assert!(!h.is_failing());
+        assert!(!h.is_partial_failure());
     }
 }

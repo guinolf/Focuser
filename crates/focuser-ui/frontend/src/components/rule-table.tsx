@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { Badge, type BadgeProps } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import { Input } from "@/components/ui/input";
 import { TargetIcon } from "@/components/ui/target-icon";
 import { m } from "@/paraglide/messages.js";
@@ -173,17 +173,17 @@ export function RuleTable({
                   {row.label}
                 </Badge>
 
-                <Button
+                <ConfirmButton
                   variant="ghost"
                   tone="destructive"
                   size="icon"
-                  // Revealed on hover so a long list is not a column of red bins.
+                  confirmLabel={m.config_confirm_delete()}
                   className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
                   aria-label={m.table_remove({ target: row.value || row.label })}
-                  onClick={() => onRemove(row.id)}
+                  onConfirm={() => onRemove(row.id)}
                 >
                   <Trash2 />
-                </Button>
+                </ConfirmButton>
               </li>
             );
           })}

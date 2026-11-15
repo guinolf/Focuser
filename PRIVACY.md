@@ -19,13 +19,16 @@ The extension reads the URLs of your browser tabs to determine whether a website
 
 ### Local Communication
 
-The extension communicates with the Focuser desktop application installed on your computer using Chrome's Native Messaging API. This communication is:
+The extension communicates with the Focuser desktop application installed on your computer using a local REST HTTP API on loopback (`http://127.0.0.1:17549`). This communication is:
 
-- **Strictly local** — between the extension and the desktop app on your machine
+- **Strictly local** — between the extension and the desktop app on your machine (loopback address only)
 - Used to sync blocking rules from the desktop app to the extension
 - Used to report blocked attempt counts back to the desktop app for local statistics
 - **No data leaves your device** through this channel
 
+### YouTube Channel Rules (Optional)
+
+When a blocking rule targets a specific YouTube channel, the extension fetches public channel metadata from `https://www.youtube.com` solely to resolve the channel ID. No personal data, account information, or credentials are submitted.
 ## Data We Do NOT Collect
 
 - No personally identifiable information
@@ -53,8 +56,11 @@ We do not sell, transfer, or share any user data with third parties. Period.
 
 ## Third-Party Services
 
-The extension does not connect to any third-party services. All functionality is local to your device.
+The extension does not connect to analytics, advertising, or cloud sync services. The only external network request ever made is the optional public YouTube channel query described above.
 
+## Scope and Protection Limits
+
+Focuser protections (Focus Lock and blocking) are self-commitment tools designed to prevent impulsive disablement within user-space. They do not prevent system-level termination by a superuser (`root` or system administrator via `SIGKILL`, process termination, or service manager override).
 ## Open Source
 
 Focuser is fully open source. You can inspect the complete source code at:

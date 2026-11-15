@@ -24,12 +24,21 @@ export function BlockingHealthBanner() {
   const [installing, setInstalling] = useState(false);
 
   if (!health.data?.active_lists) return null;
-  if (health.data.extension_connected || health.data.hosts_writable) return null;
 
-  // Only Windows has a way to run the app with the rights for the hosts file.
-  // Elsewhere that advice would mean running a desktop app as root.
-  const body = hostPlatform() === "windows" ? m.health_body() : m.health_body_extension_only();
+  const totalFailure = !health.data.extension_connected && !health.data.hosts_writable;
+  const partialFailure = health.data.extension_only_rules && !health.data.extension_connected;
 
+  if (!totalFailure && !partialFailure) return null;
+
+  const title =
+    !totalFailure && partialFailure ? m.websites_extension_needed_title() : m.health_title();
+
+  const body =
+    !totalFailure && partialFailure
+      ? m.websites_extension_needed_body()
+      : hostPlatform() === "windows"
+        ? m.health_body()
+        : m.health_body_extension_only();
   return (
     <>
       <div
@@ -38,7 +47,7 @@ export function BlockingHealthBanner() {
       >
         <ShieldAlert aria-hidden className="mt-0.5 size-4 shrink-0 self-start text-warning" />
         <div className="min-w-0 flex-1 text-sm">
-          <p className="font-medium text-foreground">{m.health_title()}</p>
+          <p className="font-medium text-foreground">{title}</p>
           <p className="mt-0.5 text-muted-foreground">{body}</p>
         </div>
         <Button variant="outline" size="sm" icon={<Puzzle />} onClick={() => setInstalling(true)}>

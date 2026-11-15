@@ -11,6 +11,7 @@ import { ListHoursOptions } from "@/components/list-hours-options";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, EmptyState, PageHeader } from "@/components/ui/card";
+import { ConfirmButton } from "@/components/ui/confirm-button";
 import { ErrorDialog } from "@/components/ui/dialog";
 import { QueryState } from "@/components/ui/feedback";
 import { Input } from "@/components/ui/input";
@@ -136,7 +137,10 @@ function ListRow({ list, lock }: { list: BlockList; lock: ProtectionInfo | null 
                 <Switch
                   checked={list.enabled}
                   onCheckedChange={(enabled) => toggle.mutate({ id: list.id, enabled })}
-                  disabled={lock !== null && list.enabled}
+                  disabled={
+                    (lock !== null && list.enabled) ||
+                    (toggle.isPending && toggle.variables?.id === list.id)
+                  }
                   aria-label={m.lists_enable({ name: list.name })}
                 />
               </span>
@@ -173,16 +177,17 @@ function ListRow({ list, lock }: { list: BlockList; lock: ProtectionInfo | null 
 
             <Tooltip content={lock ? m.lists_delete_locked() : m.lists_delete_hint()}>
               <span>
-                <Button
+                <ConfirmButton
                   variant="ghost"
                   tone="destructive"
                   size="icon"
+                  confirmLabel={m.config_confirm_delete()}
                   aria-label={m.lists_delete({ name: list.name })}
-                  disabled={lock !== null}
-                  onClick={() => remove.mutate(list.id)}
+                  disabled={lock !== null || remove.isPending}
+                  onConfirm={() => remove.mutate(list.id)}
                 >
                   <Trash2 />
-                </Button>
+                </ConfirmButton>
               </span>
             </Tooltip>
           </div>
