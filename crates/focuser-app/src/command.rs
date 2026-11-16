@@ -166,7 +166,58 @@ pub enum Command {
         days: u32,
     },
 
+    // ─── Activity ─────────────────────────────────────────────────
+    /// Measured foreground/interaction/idle time, with an explicit reason when
+    /// there is nothing to show instead of a misleading zero.
+    GetActivityOverview {
+        from: NaiveDate,
+        to: NaiveDate,
+    },
+    GetActivityHealth,
+    /// Delete every activity sample and visit. Block lists are preserved.
+    ClearActivity,
+    GetActivityRetention,
+    SetActivityRetention {
+        days: u32,
+    },
+
+    // ─── Plans ────────────────────────────────────────────────────
+    /// Attach (or replace) a plan on a list. Refused while the list's lock
+    /// would be loosened by the change.
+    SetPlan {
+        list_id: EntityId,
+        plan: Option<focuser_common::plan::Plan>,
+    },
+    GetPlanRuntimes,
+    StartPlanPause {
+        list_id: EntityId,
+    },
+    EndPlanPause {
+        list_id: EntityId,
+    },
+    /// Arm a list outside its schedule for a bounded window.
+    StartQuickTimer {
+        list_id: EntityId,
+        minutes: u32,
+    },
+    CancelQuickTimer {
+        list_id: EntityId,
+    },
+
     // ─── Protection ───────────────────────────────────────────────
+    GetProtectionPolicy {
+        list_id: EntityId,
+    },
+    /// Change a list's protection policy. While the list is protected the
+    /// change must be a tightening; loosening needs the list unlocked.
+    SetProtectionPolicy {
+        list_id: EntityId,
+        policy: focuser_common::protection::ProtectionPolicy,
+    },
+    /// Current wait/attempt state for a protected list.
+    GetUnlockStatus {
+        list_id: EntityId,
+    },
     EnableProtection {
         list_id: EntityId,
         /// `None` locks until unlocked, with no timer. Refused without a
@@ -178,6 +229,10 @@ pub enum Command {
         /// How to end the window early. `None` means "wait it out" — the
         /// pure-commitment mode where nothing can end it before it expires.
         lock: Option<LockSetup>,
+        /// Named profile whose wait and guards seed the policy. Omitted by
+        /// older clients, which get the default (Firm).
+        #[serde(default)]
+        preset: Option<focuser_common::protection::ProtectionPreset>,
     },
     ConfigureScheduledProtection {
         list_id: EntityId,
@@ -206,6 +261,55 @@ pub enum Command {
     UnlockProtection {
         list_id: EntityId,
         response: String,
+    },
+
+    // ─── Goals, tasks, notifications ──────────────────────────────
+    GetGoals {
+        include_archived: bool,
+    },
+    /// Active goals with the value measured for the current period.
+    GetGoalProgress,
+    /// Create or update a goal by id.
+    SaveGoal {
+        goal: focuser_common::productivity::Goal,
+    },
+    DeleteGoal {
+        id: EntityId,
+    },
+    GetTasks {
+        goal_id: Option<EntityId>,
+        include_done: bool,
+    },
+    /// Create or update a task by id.
+    SaveTask {
+        task: focuser_common::productivity::Task,
+    },
+    DeleteTask {
+        id: EntityId,
+    },
+    GetNotifications {
+        limit: u32,
+        unread_only: bool,
+    },
+    MarkNotificationRead {
+        #[specta(type = specta_typescript::Number)]
+        id: i64,
+    },
+    MarkAllNotificationsRead,
+    ClearNotifications,
+    /// Deterministic local insights derived from measured activity.
+    GetCoachInsights,
+    StartFocusSession {
+        label: String,
+        goal_id: Option<EntityId>,
+        task_id: Option<EntityId>,
+    },
+    FinishFocusSession {
+        id: EntityId,
+    },
+    GetFocusSessions {
+        from: NaiveDate,
+        to: NaiveDate,
     },
 
     // ─── Settings ─────────────────────────────────────────────────
@@ -437,6 +541,21 @@ pub enum CommandResult {
     ScheduledProtectionStatus(Vec<ScheduledProtectionStatus>),
     SharedAllowanceStatus(Vec<focuser_common::allowance::SharedAllowanceStatus>),
     BlockingHealth(BlockingHealth),
+    Activity(Box<focuser_common::activity::ActivityOverview>),
+    ActivityHealth(focuser_common::activity::ActivityHealth),
+    PlanRuntimes(Vec<focuser_common::plan::PlanRuntime>),
+    ProtectionPolicy(focuser_common::protection::ProtectionPolicy),
+    UnlockStatus(focuser_common::protection::UnlockStatus),
+    UnlockChallenge(UnlockChallenge),
+    Goals(Vec<focuser_common::productivity::Goal>),
+    GoalProgress(Vec<focuser_common::productivity::GoalProgress>),
+    Goal(focuser_common::productivity::Goal),
+    Tasks(Vec<focuser_common::productivity::Task>),
+    Task(focuser_common::productivity::Task),
+    Notifications(Vec<focuser_common::productivity::Notification>),
+    CoachInsights(Vec<focuser_common::productivity::CoachInsight>),
+    FocusSessions(Vec<focuser_common::productivity::FocusSession>),
+    FocusSession(Box<focuser_common::productivity::FocusSession>),
     /// A setting value; `None` when unset and no default was supplied.
     Setting(Option<String>),
     /// A yes/no outcome — e.g. "was a session actually paused".
@@ -455,6 +574,21 @@ pub enum CommandResult {
     Text(String),
     BrowserStatus(Vec<BrowserStatus>),
     AppIcons(Vec<AppIcon>),
+}
+
+/// A challenge issued together with the moment it becomes usable.
+///
+/// The wait is part of the value, not a UI timer: closing the window, killing
+/// the process or changing the clock does not shorten it, because the server
+/// stores `ready_at` and checks it again when the answer arrives.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct UnlockChallenge {
+    pub block_list_id: EntityId,
+    /// The exact text to retype. Deliberately not stored anywhere else.
+    pub challenge: String,
+    pub ready_at: chrono::DateTime<chrono::Utc>,
+    /// Seconds until `ready_at`, at the moment of issue.
+    pub wait_secs: u32,
 }
 
 /// One known browser and whether Focuser can see it.

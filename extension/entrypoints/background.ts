@@ -108,6 +108,7 @@ export default defineBackground(() => {
           "shared-activity",
           report.url,
           true,
+          { windowFocused: window.focused === true, idleSecs: idle === "active" ? 0 : 60 },
         );
     } catch {
       sharedActivity.sample(null, Date.now());
@@ -285,10 +286,17 @@ export default defineBackground(() => {
     if (!active?.url) return;
 
     try {
+      const [window, idle] = await Promise.all([
+        browser.windows.getLastFocused(),
+        browser.idle.queryState(60),
+      ]);
       const parsed = new URL(active.url);
       if (isInternalUrl(parsed.protocol)) return;
       const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
-      await sendAllowanceTick(hostname, clampIncrement(elapsed), source, active.url);
+      await sendAllowanceTick(hostname, clampIncrement(elapsed), source, active.url, false, {
+        windowFocused: window.focused === true,
+        idleSecs: idle === "active" ? 0 : 60,
+      });
     } catch {
       /* unparseable */
     }

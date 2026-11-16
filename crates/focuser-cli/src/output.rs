@@ -225,6 +225,100 @@ pub fn print_human(result: &CommandResult) {
             }
         }
 
+        CommandResult::Activity(overview) => {
+            println!(
+                "foreground {}  interaction {}  idle {}  [{}]",
+                format_duration(overview.foreground_secs),
+                format_duration(overview.interaction_secs),
+                format_duration(overview.idle_secs),
+                overview.measurement.as_str(),
+            );
+            for day in &overview.days {
+                println!("{}  {}", day.date, format_duration(day.foreground_secs));
+            }
+        }
+
+        CommandResult::ActivityHealth(h) => {
+            println!("samples           {}", h.total_sample_rows);
+            println!("collection        {}", if h.collection_enabled { "on" } else { "off" });
+            println!("extension         {}", if h.extension_connected { "connected" } else { "not connected" });
+            println!("app usage         {}", if h.app_usage_measurable { "measurable" } else { "not measurable" });
+            println!("retention         {} days", h.retention_days);
+        }
+
+        CommandResult::PlanRuntimes(runtimes) if runtimes.is_empty() => println!("No plans."),
+        CommandResult::PlanRuntimes(runtimes) => {
+            for rt in runtimes {
+                println!("{}  {:?}  blocking={}", rt.block_list_id, rt.status, rt.blocking);
+            }
+        }
+
+        CommandResult::ProtectionPolicy(policy) => {
+            println!("preset {:?}  wait {}s  challenge {} chars  attempts/hour {}",
+                policy.preset, policy.wait_secs, policy.challenge_len, policy.max_attempts_per_hour);
+        }
+
+        CommandResult::UnlockStatus(status) => {
+            println!("{:?}  remaining {}s  attempts left {}",
+                status.state, status.remaining_secs, status.attempts_remaining);
+        }
+
+        CommandResult::UnlockChallenge(c) => {
+            println!("{}", c.challenge);
+            println!("usable in {}s", c.wait_secs);
+        }
+
+        CommandResult::Goals(goals) if goals.is_empty() => println!("No goals."),
+        CommandResult::Goals(goals) => {
+            for g in goals {
+                println!("{}  {:<32} {:?} {} {:?}", g.id, truncate(&g.title, 32), g.kind, g.target_value, g.state);
+            }
+        }
+
+        CommandResult::Goal(goal) => println!("{}  {}", goal.id, goal.title),
+
+        CommandResult::GoalProgress(goals) if goals.is_empty() => println!("No goals."),
+        CommandResult::GoalProgress(goals) => {
+            for p in goals {
+                println!(
+                    "{}  {:<32} {}/{} ({}%)",
+                    p.goal.id, truncate(&p.goal.title, 32), p.current, p.target, p.percent
+                );
+            }
+        }
+
+        CommandResult::Tasks(tasks) if tasks.is_empty() => println!("No tasks."),
+        CommandResult::Tasks(tasks) => {
+            for t in tasks {
+                println!("{}  {:<32} {:?}", t.id, truncate(&t.title, 32), t.status);
+            }
+        }
+
+        CommandResult::Task(task) => println!("{}  {}", task.id, task.title),
+
+        CommandResult::Notifications(items) if items.is_empty() => println!("No notifications."),
+        CommandResult::Notifications(items) => {
+            for n in items {
+                println!("{}  {:?}  {}", n.id, n.priority, n.title);
+            }
+        }
+
+        CommandResult::CoachInsights(items) if items.is_empty() => println!("No insights."),
+        CommandResult::CoachInsights(items) => {
+            for i in items {
+                println!("{}  {}", i.title, i.body);
+            }
+        }
+
+        CommandResult::FocusSessions(items) if items.is_empty() => println!("No sessions."),
+        CommandResult::FocusSessions(items) => {
+            for s in items {
+                println!("{}  {}  {}", s.started_at.to_rfc3339(), truncate(&s.label, 32), format_duration(s.focused_secs));
+            }
+        }
+
+        CommandResult::FocusSession(session) => println!("{}", session.id),
+
         // Exported JSON goes to stdout verbatim so it can be redirected to a file.
         CommandResult::Text(text) => println!("{text}"),
 

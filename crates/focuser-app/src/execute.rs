@@ -14,6 +14,7 @@ use focuser_core::{BlockEngine, pomodoro};
 use crate::command::{
     AllowanceNotificationDto, AllowanceUsageEntry, AppIcon, BlockingHealth, BrowserStatus, Command,
     CommandResult, LockSetup, PomodoroEventDto, PomodoroHistoryEntry, ProtectionInfo,
+    UnlockChallenge,
 };
 use crate::context::{AppContext, PomodoroEvent};
 use crate::error::{CommandError, CommandOutcome};
@@ -263,7 +264,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
         // ─── Statistics ───────────────────────────────────────────
         Command::GetStats { from, to } => {
             validate_range(from, to)?;
-            Ok(CommandResult::Stats(engine.db().get_stats(from, to)?))
+            Ok(CommandResult::Stats(engine.db().usage_stats(from, to)?))
         }
 
         Command::GetBlockedEvents { from, to } => {
@@ -276,6 +277,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
 
         Command::ClearStatistics => {
             engine.db().clear_all_statistics()?;
+            engine.db().clear_activity()?;
             Ok(CommandResult::Unit)
         }
 
@@ -305,7 +307,203 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             Ok(CommandResult::Count(deleted as u32))
         }
 
+        // ─── Activity ─────────────────────────────────────────────
+        Command::GetActivityOverview { from, to } => {
+            if from > to {
+                return Err(CommandError::Validation(
+                    "the start date must not be after the end date".into(),
+                ));
+            }
+            let extension_connected = !ctx.connected_browsers().is_empty();
+            let overview = focuser_core::activity::overview(
+                engine.db(),
+                from,
+                to,
+                extension_connected,
+                focuser_common::session::app_usage_measurable(),
+                activity_collection_enabled(engine.db())?,
+            )?;
+            Ok(CommandResult::Activity(Box::new(overview)))
+        }
+
+        Command::GetActivityHealth => Ok(CommandResult::ActivityHealth(
+            focuser_common::activity::ActivityHealth {
+                app_usage_measurable: focuser_common::session::app_usage_measurable(),
+                extension_connected: !ctx.connected_browsers().is_empty(),
+                collection_enabled: activity_collection_enabled(engine.db())?,
+                total_sample_rows: engine.db().activity_sample_count()?,
+                last_sample_at: engine.db().last_activity_sample_at()?,
+                retention_days: activity_retention_days(engine.db())?,
+            },
+        )),
+
+        Command::ClearActivity => {
+            engine.db().clear_activity()?;
+            Ok(CommandResult::Unit)
+        }
+
+        Command::GetActivityRetention => {
+            Ok(CommandResult::Count(activity_retention_days(engine.db())?))
+        }
+
+        Command::SetActivityRetention { days } => {
+            if !(1..=MAX_ACTIVITY_RETENTION_DAYS).contains(&days) {
+                return Err(CommandError::Validation(format!(
+                    "retention must be between 1 and {MAX_ACTIVITY_RETENTION_DAYS} days"
+                )));
+            }
+            engine
+                .db()
+                .set_setting(SETTING_ACTIVITY_RETENTION, &days.to_string())?;
+            engine.db().cleanup_old_activity(days)?;
+            Ok(CommandResult::Unit)
+        }
+
+        // ─── Plans ────────────────────────────────────────────────
+        Command::SetPlan { list_id, plan } => {
+            let old = engine.db().get_block_list(list_id)?;
+            let mut updated = old.clone();
+            updated.plan = plan;
+            if let Some(plan) = &updated.plan {
+                plan.validate()
+                    .map_err(|e| CommandError::Validation(e.to_string()))?;
+                updated.plan = Some(plan.clone().normalized());
+            }
+            updated.updated_at = chrono::Utc::now();
+            if old.is_modification_protected()
+                && !matches!(
+                    focuser_common::protection::classify_change(&old, &updated),
+                    focuser_common::protection::ChangeClass::Tightening
+                        | focuser_common::protection::ChangeClass::Neutral
+                )
+            {
+                return Err(CommandError::Protected);
+            }
+            engine.db().update_block_list(&updated)?;
+            engine.refresh()?;
+            ctx.sync_hosts(&engine);
+            Ok(CommandResult::BlockList(Box::new(updated)))
+        }
+
+        Command::GetPlanRuntimes => {
+            engine.refresh_plan_runtimes();
+            Ok(CommandResult::PlanRuntimes(engine.plan_runtimes()))
+        }
+
+        Command::StartPlanPause { list_id } => {
+            let list = engine.db().get_block_list(list_id)?;
+            let now = chrono::Utc::now();
+            focuser_core::plans::start_pause(engine.db(), &list, now)?;
+            engine.refresh()?;
+            Ok(CommandResult::PlanRuntimes(engine.plan_runtimes()))
+        }
+
+        Command::EndPlanPause { list_id } => {
+            let list = engine.db().get_block_list(list_id)?;
+            focuser_core::plans::end_pause(engine.db(), &list, chrono::Utc::now())?;
+            engine.refresh()?;
+            Ok(CommandResult::PlanRuntimes(engine.plan_runtimes()))
+        }
+
+        Command::StartQuickTimer { list_id, minutes } => {
+            if !(1..=MAX_QUICK_TIMER_MINUTES).contains(&minutes) {
+                return Err(CommandError::Validation(format!(
+                    "quick timer must be between 1 and {MAX_QUICK_TIMER_MINUTES} minutes"
+                )));
+            }
+            let mut list = engine.db().get_block_list(list_id)?;
+            let now = chrono::Utc::now();
+            list.plan = Some(match list.plan.take() {
+                Some(mut plan) => {
+                    plan.quick_timer_ends_at = Some(now + chrono::Duration::minutes(i64::from(minutes)));
+                    plan
+                }
+                None => focuser_common::plan::Plan {
+                    quick_timer_ends_at: Some(now + chrono::Duration::minutes(i64::from(minutes))),
+                    ..Default::default()
+                },
+            });
+            list.updated_at = now;
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            ctx.sync_hosts(&engine);
+            Ok(CommandResult::BlockList(Box::new(list)))
+        }
+
+        Command::CancelQuickTimer { list_id } => {
+            let mut list = engine.db().get_block_list(list_id)?;
+            if list.is_modification_protected() {
+                return Err(CommandError::Protected);
+            }
+            if let Some(plan) = list.plan.as_mut() {
+                plan.quick_timer_ends_at = None;
+            }
+            list.updated_at = chrono::Utc::now();
+            engine.db().update_block_list(&list)?;
+            engine.refresh()?;
+            ctx.sync_hosts(&engine);
+            Ok(CommandResult::BlockList(Box::new(list)))
+        }
+
         // ─── Protection ───────────────────────────────────────────
+        Command::GetProtectionPolicy { list_id } => {
+            engine.db().get_block_list(list_id)?;
+            Ok(CommandResult::ProtectionPolicy(protection_policy(
+                engine.db(),
+                list_id,
+            )?))
+        }
+
+        Command::SetProtectionPolicy { list_id, policy } => {
+            let mut list = engine.db().get_block_list(list_id)?;
+            let policy = policy.sanitized();
+            let current = engine.db().protection_policy(&list_id.to_string())?;
+            if list.has_active_protection() {
+                // With no stored policy, the list's own flags and the floor
+                // are the baseline: "no policy" must not mean "anything goes".
+                let old = current.clone().unwrap_or_else(|| {
+                    let mut baseline = focuser_common::protection::ProtectionPolicy::default();
+                    if let Some(p) = &list.protection {
+                        baseline.prevent_uninstall = p.prevent_uninstall;
+                        baseline.prevent_service_stop = p.prevent_service_stop;
+                        baseline.prevent_modification = p.prevent_modification;
+                    }
+                    baseline
+                });
+                let tightening = policy.prevent_uninstall >= old.prevent_uninstall
+                    && policy.prevent_service_stop >= old.prevent_service_stop
+                    && policy.prevent_modification >= old.prevent_modification
+                    && policy.wait_secs >= old.wait_secs
+                    && policy.max_attempts_per_hour <= old.max_attempts_per_hour;
+                if !tightening {
+                    return Err(CommandError::Protected);
+                }
+            }
+            engine
+                .db()
+                .set_protection_policy(&list_id.to_string(), policy.clone())?;
+            // Protection flags are part of the list; keep them in step so the
+            // guard and the UI read the same thing.
+            if let Some(protection) = list.protection.as_mut() {
+                protection.prevent_uninstall = policy.prevent_uninstall;
+                protection.prevent_service_stop = policy.prevent_service_stop;
+                protection.prevent_modification = policy.prevent_modification;
+                list.updated_at = chrono::Utc::now();
+                engine.db().update_block_list(&list)?;
+                engine.refresh()?;
+            }
+            Ok(CommandResult::ProtectionPolicy(policy))
+        }
+
+        Command::GetUnlockStatus { list_id } => {
+            engine.db().get_block_list(list_id)?;
+            let policy = protection_policy(engine.db(), list_id)?;
+            Ok(CommandResult::UnlockStatus(
+                engine.db()
+                    .unlock_status_at(&list_id.to_string(), policy, ctx.now())?,
+            ))
+        }
+
         Command::EnableProtection {
             list_id,
             duration_minutes,
@@ -313,6 +511,7 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             prevent_service_stop,
             prevent_modification,
             lock,
+            preset,
         } => {
             if duration_minutes == Some(0) {
                 return Err(CommandError::Validation(
@@ -351,8 +550,20 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             // Any challenge left over from a previous window on this list is
             // for a lock that no longer exists.
             engine.db().take_unlock_challenge(list_id)?;
+            engine.db().clear_unlock_request(&list_id.to_string())?;
 
             engine.db().update_block_list(&list)?;
+            // The profile seeds the policy; the explicit switches stay
+            // authoritative, so a custom combination is not silently widened.
+            let mut policy = focuser_common::protection::ProtectionPolicy::from_preset(
+                preset.unwrap_or_default(),
+            );
+            policy.prevent_uninstall = prevent_uninstall;
+            policy.prevent_service_stop = prevent_service_stop;
+            policy.prevent_modification = prevent_modification;
+            engine
+                .db()
+                .set_protection_policy(&list_id.to_string(), policy.sanitized())?;
             engine.refresh()?;
             ctx.sync_hosts(&engine);
             Ok(CommandResult::Unit)
@@ -371,8 +582,9 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             }
             list.scheduled_protection =
                 enabled.then_some(focuser_common::types::ScheduledProtection { lock });
-            list.updated_at = chrono::Utc::now();
+            list.updated_at = ctx.now();
             engine.db().take_unlock_challenge(list_id)?;
+            engine.db().clear_unlock_request(&list_id.to_string())?;
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
             Ok(CommandResult::Unit)
@@ -455,18 +667,67 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                     "this block list has no active protection to unlock".into(),
                 ));
             }
-            let fresh = match list.effective_lock() {
-                Some(Lock::RandomText { length }) => Lock::random_text_of_length(*length),
+            let key = list_id.to_string();
+            // Every typing challenge obeys the same policy. A list protected by
+            // an older version has no stored policy yet; it gets the default one
+            // now rather than keeping a weaker, immediate unlock.
+            let policy = match engine.db().protection_policy(&key)? {
+                Some(policy) => policy.sanitized(),
+                None => {
+                    let policy = focuser_common::protection::ProtectionPolicy::default().sanitized();
+                    engine.db().set_protection_policy(&key, policy.clone())?;
+                    policy
+                }
+            };
+            match list.effective_lock() {
+                Some(Lock::RandomText { .. }) => {}
                 Some(Lock::Password { .. }) => {
                     return Err(CommandError::Validation(
                         "this list is locked with a password, not a typing challenge".into(),
                     ));
                 }
                 None => return Err(CommandError::Protected),
-            };
+            }
 
-            let challenge = engine.db().issue_unlock_challenge(list_id, &fresh)?;
-            Ok(CommandResult::Text(challenge))
+            let now = ctx.now();
+            if let Some(request) = engine.db().unlock_request(&key)? {
+                // A request that is already waiting keeps its challenge:
+                // re-asking must not invalidate the text the user copied.
+                return Ok(CommandResult::UnlockChallenge(UnlockChallenge {
+                    block_list_id: list_id,
+                    challenge: request.challenge,
+                    ready_at: request.ready_at,
+                    wait_secs: focuser_common::protection::remaining_wait(
+                        request.requested_at,
+                        request.ready_at,
+                        now,
+                    )
+                    .min(u64::from(u32::MAX)) as u32,
+                }));
+            }
+
+            let attempts = engine.db().failed_unlock_attempts(&key, now)?;
+            if attempts.len() as u32 >= policy.max_attempts_per_hour {
+                let retry = attempts
+                    .first()
+                    .map(|t| ((*t + chrono::Duration::hours(1)) - now).num_seconds().max(1) as u64)
+                    .unwrap_or(3600);
+                return Err(CommandError::UnlockRateLimited {
+                    retry_after_secs: retry,
+                });
+            }
+
+            let fresh = Lock::random_text_of_length(policy.challenge_len);
+            let request =
+                engine
+                    .db()
+                    .start_unlock_request(&key, &fresh, policy.wait_secs, now)?;
+            Ok(CommandResult::UnlockChallenge(UnlockChallenge {
+                block_list_id: list_id,
+                challenge: request.challenge,
+                ready_at: request.ready_at,
+                wait_secs: request.wait_secs,
+            }))
         }
 
         Command::UnlockProtection { list_id, response } => {
@@ -477,29 +738,80 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
                 ));
             }
 
-            // A password is checked exactly as typed, the way it was hashed.
-            let verified = match list.effective_lock() {
-                Some(lock @ Lock::Password { .. }) => lock.verify_password(&response),
-                Some(Lock::RandomText { length }) => {
-                    // Consumed unconditionally: right or wrong, this challenge
-                    // is spent, so a wrong guess cannot be retried against it
-                    // and a right one cannot be replayed. A text of another
-                    // length was issued for the list's other lock.
-                    engine
-                        .db()
-                        .take_unlock_challenge(list_id)?
-                        .is_some_and(|issued| {
-                            issued.len() == Lock::challenge_len(*length)
-                                && issued == response.trim()
-                        })
+            let key = list_id.to_string();
+            // Same rule as the challenge endpoint: a list protected before
+            // policies existed is upgraded, never left on the weaker path.
+            let policy = match engine.db().protection_policy(&key)? {
+                Some(policy) => policy.sanitized(),
+                None => {
+                    let policy = focuser_common::protection::ProtectionPolicy::default().sanitized();
+                    engine.db().set_protection_policy(&key, policy.clone())?;
+                    policy
                 }
-                // No lock means no early unlock — the only way out is to wait.
-                None => return Err(CommandError::Protected),
             };
-
-            if !verified {
-                return Err(CommandError::WrongUnlockResponse);
+            let now = ctx.now();
+            let failures = engine.db().failed_unlock_attempts(&key, now)?;
+            if failures.len() as u32 >= policy.max_attempts_per_hour {
+                let retry = failures
+                    .first()
+                    .map(|t| ((*t + chrono::Duration::hours(1)) - now).num_seconds().max(1) as u64)
+                    .unwrap_or(3600);
+                return Err(CommandError::UnlockRateLimited {
+                    retry_after_secs: retry,
+                });
             }
+
+            match list.effective_lock() {
+                Some(lock @ Lock::Password { .. }) => {
+                    if !lock.verify_password(&response) {
+                        engine.db().record_unlock_attempt(&key, false, now)?;
+                        return Err(CommandError::WrongUnlockResponse);
+                    }
+                }
+                Some(Lock::RandomText { .. }) => {
+                    let request = match engine.db().unlock_request(&key)? {
+                        Some(request) => request,
+                        None => {
+                            // No challenge outstanding: start the wait now and
+                            // refuse the answer. A guess can never skip the wait.
+                            let fresh = Lock::random_text_of_length(policy.challenge_len);
+                            let started =
+                                engine
+                                    .db()
+                                    .start_unlock_request(&key, &fresh, policy.wait_secs, now)?;
+                            return Err(CommandError::UnlockNotReady {
+                                remaining_secs: focuser_common::protection::remaining_wait(
+                                    started.requested_at,
+                                    started.ready_at,
+                                    now,
+                                ),
+                            });
+                        }
+                    };
+                    let remaining = focuser_common::protection::remaining_wait(
+                        request.requested_at,
+                        request.ready_at,
+                        now,
+                    );
+                    if remaining > 0 {
+                        return Err(CommandError::UnlockNotReady {
+                            remaining_secs: remaining,
+                        });
+                    }
+                    // Exact match: no trimming, no case folding. The wait was
+                    // the point, not the typing.
+                    if request.challenge != response {
+                        engine.db().record_unlock_attempt(&key, false, now)?;
+                        engine.db().clear_unlock_request(&key)?;
+                        return Err(CommandError::WrongUnlockResponse);
+                    }
+                }
+                None => return Err(CommandError::Protected),
+            }
+
+            engine.db().record_unlock_attempt(&key, true, now)?;
+            engine.db().clear_unlock_request(&key)?;
+            engine.db().clear_protection_policy(&key)?;
 
             // End the manual commitment, or bypass this scheduled occurrence.
             // Neither action disables blocking. Independent overlapping manual
@@ -507,14 +819,178 @@ pub fn execute(ctx: &AppContext, cmd: Command) -> CommandOutcome<CommandResult> 
             if list.manual_protection().is_some() {
                 list.protection = None;
                 list.lock = None;
-            } else if let Some(p) = list.scheduled_protection_at(chrono::Local::now()) {
+            } else if let Some(p) = list.scheduled_protection_at(now.with_timezone(&chrono::Local)) {
                 list.schedule_unlocked_until = p.expires_at;
             }
-            list.updated_at = chrono::Utc::now();
+            list.updated_at = now;
 
             engine.db().update_block_list(&list)?;
             engine.refresh()?;
+            ctx.sync_hosts(&engine);
             Ok(CommandResult::Unit)
+        }
+
+        // ─── Goals, tasks, notifications, coach ───────────────────
+        Command::GetGoals { include_archived } => Ok(CommandResult::Goals(
+            engine.db().list_goals(include_archived)?,
+        )),
+
+        Command::GetGoalProgress => Ok(CommandResult::GoalProgress(
+            focuser_core::coach::goals_with_progress(engine.db(), ctx.now())?,
+        )),
+
+        Command::SaveGoal { goal } => {
+            goal.validate().map_err(CommandError::Validation)?;
+            engine.db().save_goal(&goal)?;
+            Ok(CommandResult::Goal(goal))
+        }
+
+        Command::DeleteGoal { id } => {
+            // Tasks that pointed at this goal are detached, not deleted, by
+            // the database layer; deleting is still an explicit UI action.
+            engine.db().delete_goal(id)?;
+            Ok(CommandResult::Unit)
+        }
+
+        Command::GetTasks {
+            goal_id,
+            include_done,
+        } => {
+            let mut tasks = engine.db().list_tasks(true)?;
+            if let Some(goal_id) = goal_id {
+                tasks.retain(|t| t.goal_id == Some(goal_id));
+            }
+            if !include_done {
+                tasks.retain(|t| t.status != focuser_common::productivity::TaskStatus::Done);
+            }
+            Ok(CommandResult::Tasks(tasks))
+        }
+
+        Command::SaveTask { task } => {
+            let mut task = task;
+            task.validate().map_err(CommandError::Validation)?;
+            // Completion is a timestamped transition; a status-only edit must
+            // not produce a done task that no period can count.
+            match task.status {
+                focuser_common::productivity::TaskStatus::Done => {
+                    if task.completed_at.is_none() {
+                        task.completed_at = Some(ctx.now());
+                    }
+                }
+                _ => task.completed_at = None,
+            }
+            engine.db().save_task(&task)?;
+            Ok(CommandResult::Task(task))
+        }
+
+        Command::DeleteTask { id } => {
+            engine.db().delete_task(id)?;
+            Ok(CommandResult::Unit)
+        }
+
+        Command::GetNotifications {
+            limit,
+            unread_only,
+        } => {
+            // Opening the centre is the moment to turn current measured state
+            // into reminders; the dedupe keys make repeated opens harmless.
+            focuser_core::notifications::sync(engine.db(), ctx.now())?;
+            Ok(CommandResult::Notifications(
+                engine.db().list_notifications(limit.min(500), unread_only)?,
+            ))
+        }
+
+        Command::MarkNotificationRead { id } => {
+            engine.db().mark_notification_read(id)?;
+            Ok(CommandResult::Unit)
+        }
+
+        Command::MarkAllNotificationsRead => Ok(CommandResult::Count(
+            engine.db().mark_all_notifications_read()?,
+        )),
+
+        Command::ClearNotifications => {
+            engine.db().clear_notifications()?;
+            Ok(CommandResult::Unit)
+        }
+
+        Command::GetCoachInsights => {
+            let insights = focuser_core::coach::insights(
+                engine.db(),
+                ctx.now(),
+                !ctx.connected_browsers().is_empty(),
+                focuser_common::session::app_usage_measurable(),
+                activity_collection_enabled(engine.db())?,
+            )?;
+            focuser_core::notifications::remember_insights(engine.db(), &insights, ctx.now())?;
+            Ok(CommandResult::CoachInsights(insights))
+        }
+
+        Command::StartFocusSession {
+            label,
+            goal_id,
+            task_id,
+        } => {
+            let label = label.trim();
+            if label.is_empty() {
+                return Err(CommandError::Validation(
+                    "session label must not be empty".into(),
+                ));
+            }
+            if engine
+                .db()
+                .focus_sessions_between(
+                    chrono::Utc::now() - chrono::Duration::hours(24),
+                    chrono::Utc::now() + chrono::Duration::hours(1),
+                )?
+                .iter()
+                .any(|s| s.ended_at.is_none())
+            {
+                return Err(CommandError::Validation(
+                    "a focus session is already running".into(),
+                ));
+            }
+            let session = focuser_common::productivity::FocusSession {
+                id: focuser_common::types::new_id(),
+                started_at: chrono::Utc::now(),
+                ended_at: None,
+                planned_secs: 0,
+                focused_secs: 0,
+                task_id,
+                goal_id,
+                block_list_id: None,
+                source: "manual".into(),
+                label: label.to_string(),
+            };
+            engine.db().save_focus_session(&session)?;
+            Ok(CommandResult::FocusSession(Box::new(session)))
+        }
+
+        Command::FinishFocusSession { id } => {
+            let mut session = engine.db().get_focus_session(id)?;
+            if session.ended_at.is_some() {
+                return Err(CommandError::Validation(
+                    "this focus session already ended".into(),
+                ));
+            }
+            let now = chrono::Utc::now();
+            let elapsed = (now - session.started_at).num_seconds().max(0) as u64;
+            session.ended_at = Some(now);
+            session.focused_secs = elapsed;
+            engine.db().save_focus_session(&session)?;
+            Ok(CommandResult::FocusSession(Box::new(session)))
+        }
+
+        Command::GetFocusSessions { from, to } => {
+            if from > to {
+                return Err(CommandError::Validation(
+                    "the start date must not be after the end date".into(),
+                ));
+            }
+            let (start, end) = focuser_core::db::activity::local_range(from, to)?;
+            Ok(CommandResult::FocusSessions(
+                engine.db().focus_sessions_between(start, end)?,
+            ))
         }
 
         // ─── Settings ─────────────────────────────────────────────
@@ -963,6 +1439,13 @@ const DEFAULT_STATS_RETENTION_DAYS: u32 = 30;
 /// ~100 years. Guards against a typo turning into an effectively unbounded table.
 const MAX_STATS_RETENTION_DAYS: u32 = 36_500;
 
+/// Activity retention and quick-timer bounds.
+const SETTING_ACTIVITY_RETENTION: &str = focuser_core::activity::SETTING_RETENTION;
+const SETTING_ACTIVITY_COLLECTION: &str = "activity_collection";
+const DEFAULT_ACTIVITY_RETENTION_DAYS: u32 = focuser_core::activity::DEFAULT_RETENTION_DAYS;
+const MAX_ACTIVITY_RETENTION_DAYS: u32 = focuser_core::activity::MAX_RETENTION_DAYS;
+const MAX_QUICK_TIMER_MINUTES: u32 = 24 * 60;
+
 /// Reject inverted date ranges, which silently return nothing rather than erroring.
 fn validate_range(from: chrono::NaiveDate, to: chrono::NaiveDate) -> CommandOutcome<()> {
     if from > to {
@@ -1002,6 +1485,32 @@ fn prepare_lock(lock: Option<LockSetup>) -> CommandOutcome<Option<Lock>> {
 ///
 /// Every rule command follows this shape; centralising it means the protection
 /// check and the hosts re-sync cannot be forgotten on a new command.
+fn activity_retention_days(db: &focuser_core::db::Database) -> CommandOutcome<u32> {
+    Ok(db
+        .get_setting(SETTING_ACTIVITY_RETENTION)?
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_ACTIVITY_RETENTION_DAYS)
+        .clamp(1, MAX_ACTIVITY_RETENTION_DAYS))
+}
+
+/// Activity collection defaults to on; the switch exists so a user can stop
+/// local recording, and an explicit `off` must be honoured.
+fn activity_collection_enabled(db: &focuser_core::db::Database) -> CommandOutcome<bool> {
+    Ok(db
+        .get_setting(SETTING_ACTIVITY_COLLECTION)?
+        .is_none_or(|v| v != "off"))
+}
+
+fn protection_policy(
+    db: &focuser_core::db::Database,
+    list_id: EntityId,
+) -> CommandOutcome<focuser_common::protection::ProtectionPolicy> {
+    Ok(db
+        .protection_policy(&list_id.to_string())?
+        .unwrap_or_default()
+        .sanitized())
+}
+
 fn mutate_list(
     ctx: &AppContext,
     engine: &mut BlockEngine,
@@ -1143,7 +1652,23 @@ mod tests {
 
     fn ctx() -> AppContext {
         let db = Database::open_in_memory().unwrap();
-        AppContext::new_headless(BlockEngine::new(db).unwrap())
+        AppContext::new_with_clock(
+            BlockEngine::new(db).unwrap(),
+            std::sync::Arc::new(crate::context::NoopSync),
+            std::sync::Arc::new(crate::context::TestClock::new(chrono::Utc::now())),
+        )
+    }
+
+    /// Ask for a challenge and let the enforced wait elapse, returning the
+    /// exact text the user would type.
+    fn unlock_challenge(ctx: &AppContext, list_id: EntityId) -> String {
+        let CommandResult::UnlockChallenge(challenge) =
+            execute(ctx, Command::RequestUnlockChallenge { list_id }).unwrap()
+        else {
+            panic!("challenge expected")
+        };
+        ctx.clock().advance(i64::from(challenge.wait_secs) + 1);
+        challenge.challenge
     }
 
     /// A context that behaves like a machine with the extension installed.
@@ -1740,6 +2265,7 @@ mod tests {
                 prevent_service_stop: true,
                 prevent_modification: true,
                 lock,
+                preset: None,
             },
         )
     }
@@ -1991,6 +2517,8 @@ mod tests {
                 url: Some("https://youtube.com/".into()),
                 app_exe: None,
                 active: true,
+                window_focused: None,
+                idle_secs: None,
                 shared_active: true,
                 shared_only: true,
                 source: "test".into(),
@@ -2160,16 +2688,12 @@ mod tests {
             .code(),
             "protected"
         );
-        let CommandResult::Text(challenge) =
-            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
-        else {
-            panic!()
-        };
+        let challenge = unlock_challenge(&ctx, list.id);
         execute(
             &ctx,
             Command::UnlockProtection {
                 list_id: list.id,
-                response: challenge,
+                response: challenge.clone(),
             },
         )
         .unwrap();
@@ -2457,63 +2981,54 @@ mod tests {
     }
 
     #[test]
-    fn a_challenge_issued_for_one_lock_does_not_open_the_other() {
+    fn a_challenge_for_one_list_does_not_open_another() {
         let ctx = ctx();
-        let list = scheduled_list(&ctx, Some(LockSetup::RandomText { length: 64 }));
-        let challenge = || {
-            let CommandResult::Text(text) =
-                execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
-            else {
-                panic!("challenge expected")
-            };
-            text
-        };
-        // A manual lock with a short text on top of the scheduled one. Its text
-        // is asked for and never typed, and then the manual lock runs out.
-        let leave_a_short_text_behind = || {
-            let manual = |expires_in| {
-                let mut engine = ctx.engine.lock().unwrap();
-                let mut stored = engine.db().get_block_list(list.id).unwrap();
-                let mut protection = Protection::for_duration(60);
-                protection.expires_at =
-                    Some(chrono::Utc::now() + chrono::Duration::minutes(expires_in));
-                stored.protection = Some(protection);
-                stored.lock = Some(Lock::RandomText { length: 6 });
-                engine.db().update_block_list(&stored).unwrap();
-                engine.refresh().unwrap();
-            };
-            manual(60);
-            let short = challenge();
-            assert_eq!(short.len(), 6);
-            manual(-1);
-            short
-        };
-        let unlock = |response: String| {
+        let first = create(&ctx, "First");
+        let second = create(&ctx, "Second");
+        protect_until_unlocked(
+            &ctx,
+            first.id,
+            Some(LockSetup::RandomText { length: 20 }),
+        )
+        .unwrap();
+        protect_until_unlocked(
+            &ctx,
+            second.id,
+            Some(LockSetup::RandomText { length: 20 }),
+        )
+        .unwrap();
+
+        let first_challenge = unlock_challenge(&ctx, first.id);
+        let second_challenge = unlock_challenge(&ctx, second.id);
+        assert_ne!(first_challenge, second_challenge);
+
+        assert_eq!(
             execute(
                 &ctx,
                 Command::UnlockProtection {
-                    list_id: list.id,
-                    response,
+                    list_id: second.id,
+                    response: first_challenge,
                 },
             )
-        };
-        let locked = || ctx.engine.lock().unwrap().is_block_list_protected(list.id);
+            .unwrap_err()
+            .code(),
+            "wrong_unlock_response"
+        );
+        assert!(lists(&ctx)[1].has_active_protection());
+        assert!(lists(&ctx)[0].has_active_protection());
 
-        // Typed straight in, as the CLI can: six characters instead of 64.
-        let short = leave_a_short_text_behind();
-        assert!(matches!(
-            unlock(short),
-            Err(CommandError::WrongUnlockResponse)
-        ));
-        assert!(locked());
-
-        // Asked for again, as the app does: the text is for the lock in force.
-        leave_a_short_text_behind();
-        let long = challenge();
-        assert_eq!(long.len(), 64);
-        assert_eq!(challenge(), long, "asking twice must not change the text");
-        unlock(long).unwrap();
-        assert!(!locked());
+        // The right text still opens its own list.
+        let again = unlock_challenge(&ctx, second.id);
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: second.id,
+                response: again,
+            },
+        )
+        .unwrap();
+        assert!(lists(&ctx)[1].protection.is_none());
+        assert!(lists(&ctx)[0].has_active_protection());
     }
 
     #[test]
@@ -2882,6 +3397,7 @@ mod tests {
                 prevent_service_stop: true,
                 prevent_modification: true,
                 lock,
+                preset: None,
             },
         )
     }
@@ -2947,18 +3463,16 @@ mod tests {
     }
 
     #[test]
-    fn random_text_can_be_up_to_5000_characters() {
+    fn the_unlock_challenge_is_always_twenty_characters() {
         let ctx = ctx();
         let list = create(&ctx, "Committed");
+        // A legacy list may carry any stored length; the policy decides the
+        // challenge length, so an old 5000-character setting cannot weaken it.
         protect_until_unlocked(&ctx, list.id, Some(LockSetup::RandomText { length: 5000 }))
             .unwrap();
 
-        let CommandResult::Text(challenge) =
-            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
-        else {
-            panic!("expected a challenge");
-        };
-        assert_eq!(challenge.chars().count(), 5000);
+        let challenge = unlock_challenge(&ctx, list.id);
+        assert_eq!(challenge.chars().count(), 20);
         execute(
             &ctx,
             Command::UnlockProtection {
@@ -3004,12 +3518,8 @@ mod tests {
         let list = create(&ctx, "Committed");
         protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
 
-        let CommandResult::Text(challenge) =
-            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
-        else {
-            panic!("expected a challenge string");
-        };
-        assert_eq!(challenge.chars().count(), 12);
+        let challenge = unlock_challenge(&ctx, list.id);
+        assert_eq!(challenge.chars().count(), 20);
 
         execute(
             &ctx,
@@ -3020,9 +3530,10 @@ mod tests {
         )
         .unwrap();
 
-        // Re-protect with a fresh random-text lock and prove the *old*
-        // challenge no longer answers it.
+        // Re-protect with a fresh lock and prove the *old* challenge no
+        // longer answers it, even after a new request has waited its turn.
         protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
+        let _new = unlock_challenge(&ctx, list.id);
         let err = execute(
             &ctx,
             Command::UnlockProtection {
@@ -3039,19 +3550,23 @@ mod tests {
         let ctx = ctx();
         let list = create(&ctx, "Committed");
         protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
-        let ask = || execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id });
-
-        let (Ok(CommandResult::Text(first)), Ok(CommandResult::Text(second))) = (ask(), ask())
-        else {
-            panic!("expected two challenge strings");
+        let ask = || match execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id })
+            .unwrap()
+        {
+            CommandResult::UnlockChallenge(c) => c,
+            _ => panic!("expected a challenge"),
         };
-        assert_eq!(first, second);
+        let first = ask();
+        let second = ask();
+        assert_eq!(first.challenge, second.challenge);
+        assert_eq!(first.challenge.chars().count(), 20);
+        ctx.clock().advance(i64::from(first.wait_secs) + 1);
 
         execute(
             &ctx,
             Command::UnlockProtection {
                 list_id: list.id,
-                response: first,
+                response: first.challenge,
             },
         )
         .unwrap();
@@ -3063,11 +3578,7 @@ mod tests {
         let list = create(&ctx, "Committed");
         protect_with_lock(&ctx, list.id, Some(LockSetup::RandomText { length: 12 })).unwrap();
 
-        let CommandResult::Text(challenge) =
-            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
-        else {
-            panic!("expected a challenge string");
-        };
+        let challenge = unlock_challenge(&ctx, list.id);
 
         assert_eq!(
             execute(
@@ -3082,9 +3593,8 @@ mod tests {
             "wrong_unlock_response"
         );
 
-        // The right string, if retried against the same (now spent)
-        // challenge, must also fail — a wrong guess does not get an
-        // unlimited number of attempts against one string.
+        // The same right string no longer answers: the request was consumed
+        // and the wait starts over, so a failed guess buys no shortcut.
         assert_eq!(
             execute(
                 &ctx,
@@ -3095,8 +3605,21 @@ mod tests {
             )
             .unwrap_err()
             .code(),
-            "wrong_unlock_response"
+            "unlock_not_ready"
         );
+        assert!(lists(&ctx)[0].has_active_protection());
+
+        // After a fresh request and the full wait, it opens.
+        let fresh = unlock_challenge(&ctx, list.id);
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: fresh,
+            },
+        )
+        .unwrap();
+        assert!(lists(&ctx)[0].protection.is_none());
     }
 
     #[test]
@@ -3222,6 +3745,7 @@ mod tests {
                 lock: Some(LockSetup::Password {
                     password: "correct-horse".into(),
                 }),
+                preset: None,
             },
         )
         .unwrap();
@@ -3793,6 +4317,7 @@ mod tests {
                 prevent_service_stop: true,
                 prevent_modification: true,
                 lock: None,
+                preset: None,
             },
         )
         .unwrap();
@@ -4146,5 +4671,434 @@ mod tests {
 
         assert!(health.extension_connected);
         assert!(!health.is_failing());
+    }
+
+    #[test]
+    fn the_unlock_wait_survives_a_restart_and_a_clock_rollback() {
+        use crate::context::Clock as _;
+        use std::sync::Arc;
+        let path = std::env::temp_dir().join(format!(
+            "focuser-2-unlock-{}.db",
+            focuser_common::types::new_id()
+        ));
+        let start = chrono::Utc::now();
+        let clock = Arc::new(crate::context::TestClock::new(start));
+        let open = |path: &std::path::Path| {
+            AppContext::new_with_clock(
+                BlockEngine::new(Database::open(path).unwrap()).unwrap(),
+                Arc::new(crate::context::NoopSync),
+                clock.clone(),
+            )
+        };
+
+        let ctx = open(&path);
+        let list = create(&ctx, "Committed");
+        protect_with_lock(
+            &ctx,
+            list.id,
+            Some(LockSetup::RandomText { length: 20 }),
+        )
+        .unwrap();
+        let CommandResult::UnlockChallenge(challenge) =
+            execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap()
+        else {
+            panic!("challenge expected")
+        };
+        assert_eq!(challenge.wait_secs, 600);
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response: challenge.challenge.clone(),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "unlock_not_ready",
+            "knowing the text must not skip the wait"
+        );
+        drop(ctx);
+
+        // Restart: a new database handle, engine and context on the same file.
+        let ctx = open(&path);
+        let CommandResult::UnlockStatus(status) =
+            execute(&ctx, Command::GetUnlockStatus { list_id: list.id }).unwrap()
+        else {
+            panic!("status expected")
+        };
+        assert!(status.remaining_secs > 0 && status.remaining_secs <= 600);
+
+        // Setting the clock back restarts, never shortens, the wait.
+        clock.advance(-3600);
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::UnlockProtection {
+                    list_id: list.id,
+                    response: challenge.challenge.clone(),
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "unlock_not_ready"
+        );
+
+        clock.advance(3600 + 601);
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: challenge.challenge,
+            },
+        )
+        .unwrap();
+        assert!(!ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+        drop(ctx);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unlock_attempts_are_rate_limited_per_rolling_hour() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(
+            &ctx,
+            list.id,
+            Some(LockSetup::RandomText { length: 20 }),
+        )
+        .unwrap();
+        let CommandResult::ProtectionPolicy(mut policy) =
+            execute(&ctx, Command::GetProtectionPolicy { list_id: list.id }).unwrap()
+        else {
+            panic!("policy expected")
+        };
+        policy.max_attempts_per_hour = 1;
+        execute(
+            &ctx,
+            Command::SetProtectionPolicy {
+                list_id: list.id,
+                policy,
+            },
+        )
+        .unwrap();
+
+        let challenge = unlock_challenge(&ctx, list.id);
+        execute(
+            &ctx,
+            Command::UnlockProtection {
+                list_id: list.id,
+                response: "wrong".into(),
+            },
+        )
+        .unwrap_err();
+        let err = execute(&ctx, Command::RequestUnlockChallenge { list_id: list.id }).unwrap_err();
+        assert_eq!(err.code(), "unlock_rate_limited");
+        assert!(err.to_string().contains("minute") || err.to_string().contains("seconds") || err.to_string().contains("retry"));
+        assert!(ctx.engine.lock().unwrap().is_block_list_protected(list.id));
+        assert!(!challenge.is_empty());
+    }
+
+    #[test]
+    fn a_protection_policy_can_only_tighten_while_locked() {
+        let ctx = ctx();
+        let list = create(&ctx, "Committed");
+        protect_with_lock(
+            &ctx,
+            list.id,
+            Some(LockSetup::RandomText { length: 20 }),
+        )
+        .unwrap();
+        let CommandResult::ProtectionPolicy(mut policy) =
+            execute(&ctx, Command::GetProtectionPolicy { list_id: list.id }).unwrap()
+        else {
+            panic!("policy expected")
+        };
+
+        policy.max_attempts_per_hour = 10;
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::SetProtectionPolicy {
+                    list_id: list.id,
+                    policy,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "protected",
+            "more attempts is a loosening"
+        );
+
+        let CommandResult::ProtectionPolicy(mut policy) =
+            execute(&ctx, Command::GetProtectionPolicy { list_id: list.id }).unwrap()
+        else {
+            panic!("policy expected")
+        };
+        policy.max_attempts_per_hour = 1;
+        policy.wait_secs = 900;
+        execute(
+            &ctx,
+            Command::SetProtectionPolicy {
+                list_id: list.id,
+                policy,
+            },
+        )
+        .unwrap();
+        let CommandResult::ProtectionPolicy(stored) =
+            execute(&ctx, Command::GetProtectionPolicy { list_id: list.id }).unwrap()
+        else {
+            panic!("policy expected")
+        };
+        assert_eq!(stored.challenge_len, 20);
+        assert!(stored.wait_secs >= 900);
+        assert_eq!(stored.max_attempts_per_hour, 1);
+    }
+
+    #[test]
+    fn activity_commands_tell_disabled_from_recorded() {
+        use focuser_common::activity::{ActivityMeasurement, ActivitySource, ActivityTick};
+
+        let ctx = ctx();
+        execute(
+            &ctx,
+            Command::SetSetting {
+                key: "activity_collection".into(),
+                value: "off".into(),
+            },
+        )
+        .unwrap();
+        let today = chrono::Local::now().date_naive();
+        let CommandResult::Activity(overview) = execute(
+            &ctx,
+            Command::GetActivityOverview {
+                from: today,
+                to: today,
+            },
+        )
+        .unwrap() else {
+            panic!("overview expected")
+        };
+        assert_eq!(overview.measurement, ActivityMeasurement::Disabled);
+
+        execute(
+            &ctx,
+            Command::SetSetting {
+                key: "activity_collection".into(),
+                value: "on".into(),
+            },
+        )
+        .unwrap();
+        let mut tick = ActivityTick {
+            source: ActivitySource::BrowserTab,
+            target: "example.com".into(),
+            increment_secs: Some(42),
+            interaction: true,
+            idle: false,
+            observed_at: Some(chrono::Utc::now()),
+            device_id: None,
+        };
+        tick.normalize();
+        ctx.engine
+            .lock()
+            .unwrap()
+            .db()
+            .record_activity_tick(&tick)
+            .unwrap();
+
+        let CommandResult::Activity(overview) = execute(
+            &ctx,
+            Command::GetActivityOverview {
+                from: today,
+                to: today,
+            },
+        )
+        .unwrap() else {
+            panic!("overview expected")
+        };
+        assert_eq!(overview.measurement, ActivityMeasurement::Recorded);
+        assert_eq!(overview.foreground_secs, 42);
+        assert_eq!(overview.interaction_secs, 42);
+        assert_eq!(overview.targets.len(), 1);
+    }
+
+    #[test]
+    fn a_time_limit_plan_counts_measured_time_and_blocks_when_spent() {
+        use focuser_common::activity::{ActivitySource, ActivityTick};
+        use focuser_common::plan::{Plan, PlanMode, PlanStatus, TimeLimit};
+        use focuser_common::types::WebsiteRule;
+
+        let ctx = ctx();
+        let mut list = create(&ctx, "Social");
+        list.websites = vec![WebsiteRule::domain("example.com")];
+        list.enabled = true;
+        execute(
+            &ctx,
+            Command::UpdateBlockList {
+                list: Box::new(list.clone()),
+            },
+        )
+        .unwrap();
+        let mut plan = Plan::with_mode(PlanMode::TimeLimit);
+        plan.time_limit = Some(TimeLimit { daily_minutes: 1 });
+        plan.pauses = Some(focuser_common::plan::PausePolicy::default());
+        execute(
+            &ctx,
+            Command::SetPlan {
+                list_id: list.id,
+                plan: Some(plan),
+            },
+        )
+        .unwrap();
+
+        let runtimes = || {
+            let CommandResult::PlanRuntimes(r) =
+                execute(&ctx, Command::GetPlanRuntimes).unwrap()
+            else {
+                panic!("runtimes expected")
+            };
+            r
+        };
+        assert_eq!(runtimes().len(), 1);
+        assert!(!runtimes()[0].blocking);
+        assert_eq!(runtimes()[0].used_secs, 0);
+
+        let now = chrono::Utc::now();
+        for offset in [0, 60] {
+            let mut tick = ActivityTick {
+                source: ActivitySource::BrowserTab,
+                target: "example.com".into(),
+                increment_secs: Some(60),
+                interaction: true,
+                idle: false,
+                observed_at: Some(now - chrono::Duration::seconds(offset)),
+                device_id: None,
+            };
+            tick.normalize();
+            ctx.engine
+                .lock()
+                .unwrap()
+                .db()
+                .record_activity_tick(&tick)
+                .unwrap();
+        }
+        ctx.engine.lock().unwrap().refresh_plan_runtimes();
+        let runtime = runtimes().remove(0);
+        assert_eq!(runtime.used_secs, 120);
+        assert!(runtime.blocking);
+        assert_eq!(runtime.status, PlanStatus::LimitReached);
+        assert!(ctx.engine.lock().unwrap().check_domain("example.com").is_some());
+
+        execute(&ctx, Command::StartPlanPause { list_id: list.id }).unwrap();
+        ctx.engine.lock().unwrap().refresh_plan_runtimes();
+        assert_eq!(runtimes()[0].status, PlanStatus::Paused);
+        assert!(ctx.engine.lock().unwrap().check_domain("example.com").is_none());
+        execute(&ctx, Command::EndPlanPause { list_id: list.id }).unwrap();
+        ctx.engine.lock().unwrap().refresh_plan_runtimes();
+        assert!(runtimes()[0].blocking);
+    }
+
+    #[test]
+    fn a_focus_session_is_single_and_its_label_is_kept() {
+        use focuser_common::productivity::{Goal, GoalKind};
+
+        let ctx = ctx();
+        let goal = Goal::new("Write the report", GoalKind::Result, 1);
+        execute(
+            &ctx,
+            Command::SaveGoal {
+                goal: goal.clone(),
+            },
+        )
+        .unwrap();
+        let CommandResult::FocusSession(session) = execute(
+            &ctx,
+            Command::StartFocusSession {
+                label: "write the report".into(),
+                goal_id: Some(goal.id),
+                task_id: None,
+            },
+        )
+        .unwrap() else {
+            panic!("session expected")
+        };
+        assert_eq!(session.label, "write the report");
+        assert_eq!(session.source, "manual");
+        assert_eq!(
+            execute(
+                &ctx,
+                Command::StartFocusSession {
+                    label: "second".into(),
+                    goal_id: None,
+                    task_id: None,
+                },
+            )
+            .unwrap_err()
+            .code(),
+            "validation",
+            "only one session may run at a time"
+        );
+
+        let CommandResult::FocusSession(finished) = execute(
+            &ctx,
+            Command::FinishFocusSession { id: session.id },
+        )
+        .unwrap() else {
+            panic!("session expected")
+        };
+        assert!(finished.ended_at.is_some());
+        let today = chrono::Local::now().date_naive();
+        let CommandResult::FocusSessions(sessions) = execute(
+            &ctx,
+            Command::GetFocusSessions {
+                from: today,
+                to: today,
+            },
+        )
+        .unwrap() else {
+            panic!("sessions expected")
+        };
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].label, "write the report");
+    }
+
+    #[test]
+    fn marking_a_task_done_stamps_the_completion_time_once() {
+        use focuser_common::productivity::{Task, TaskStatus};
+
+        let ctx = ctx();
+        let mut task = Task::new("ship it");
+        task.status = TaskStatus::Done;
+        task.completed_at = None;
+
+        let CommandResult::Task(saved) = execute(
+            &ctx,
+            Command::SaveTask {
+                task: task.clone(),
+            },
+        )
+        .unwrap() else {
+            panic!("task expected")
+        };
+        let first = saved.completed_at.expect("done task gets a timestamp");
+        assert_eq!(first, ctx.now());
+
+        // Editing a done task keeps the original completion instant.
+        let mut edited = saved.clone();
+        edited.title = "ship it well".into();
+        let CommandResult::Task(saved) = execute(&ctx, Command::SaveTask { task: edited }).unwrap()
+        else {
+            panic!("task expected")
+        };
+        assert_eq!(saved.completed_at, Some(first));
+
+        // Reopening clears it, so a period goal cannot count it as done.
+        let mut reopened = saved;
+        reopened.status = TaskStatus::Todo;
+        let CommandResult::Task(saved) = execute(&ctx, Command::SaveTask { task: reopened }).unwrap()
+        else {
+            panic!("task expected")
+        };
+        assert!(saved.completed_at.is_none());
     }
 }

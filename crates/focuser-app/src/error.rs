@@ -50,6 +50,12 @@ pub enum CommandError {
     #[error("that password or text did not match")]
     WrongUnlockResponse,
 
+    #[error("the wait is not over yet: {remaining_secs} seconds left")]
+    UnlockNotReady { remaining_secs: u64 },
+
+    #[error("too many wrong answers; try again in {retry_after_secs} seconds")]
+    UnlockRateLimited { retry_after_secs: u64 },
+
     #[error("invalid input: {0}")]
     Validation(String),
 
@@ -98,6 +104,8 @@ impl CommandError {
             Self::AllowanceNotFound(_) => "allowance_not_found",
             Self::Protected => "protected",
             Self::WrongUnlockResponse => "wrong_unlock_response",
+            Self::UnlockNotReady { .. } => "unlock_not_ready",
+            Self::UnlockRateLimited { .. } => "unlock_rate_limited",
             Self::Validation(_) => "validation",
             Self::Unsupported => "unsupported",
             Self::Core(_) => "core",
@@ -111,6 +119,8 @@ impl CommandError {
             Self::BlockListNotFound(_) | Self::RuleNotFound(_) | Self::AllowanceNotFound(_) => 4,
             Self::Protected => 5,
             Self::WrongUnlockResponse => 3,
+            Self::UnlockNotReady { .. } => 7,
+            Self::UnlockRateLimited { .. } => 8,
             Self::Validation(_) => 2,
             Self::Unsupported => 6,
             Self::Core(_) | Self::Internal(_) => 1,

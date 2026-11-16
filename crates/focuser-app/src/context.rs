@@ -6,6 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, Utc};
 use focuser_core::BlockEngine;
 use focuser_core::allowance::AllowanceTracker;
 
@@ -64,6 +65,51 @@ pub trait SystemSync: Send + Sync {
     }
 }
 
+/// Source of "now" for commands whose rules depend on elapsed time.
+///
+/// Injected rather than read from `Utc::now()` directly so the unlock wait,
+/// which must survive restarts, can be tested without sleeping ten minutes.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+
+    /// Test hook; the real clock does not move because a test asked it to.
+    #[cfg(test)]
+    fn advance(&self, _secs: i64) {}
+}
+
+/// The real clock.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+/// A clock a test can move forward.
+#[cfg(test)]
+pub struct TestClock(Mutex<DateTime<Utc>>);
+
+#[cfg(test)]
+impl TestClock {
+    pub fn new(now: DateTime<Utc>) -> Self {
+        Self(Mutex::new(now))
+    }
+
+}
+
+#[cfg(test)]
+impl Clock for TestClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self.0.lock().unwrap()
+    }
+
+    fn advance(&self, secs: i64) {
+        let mut now = self.0.lock().unwrap();
+        *now += chrono::Duration::seconds(secs);
+    }
+}
+
 /// Does nothing. For tests and for headless contexts with no hosts access.
 pub struct NoopSync;
 
@@ -77,6 +123,7 @@ pub struct AppContext {
     pub allowance_tracker: AllowanceTracker,
     pomodoro_events: Mutex<Vec<PomodoroEvent>>,
     system: Arc<dyn SystemSync>,
+    clock: Arc<dyn Clock>,
 }
 
 impl AppContext {
@@ -87,7 +134,31 @@ impl AppContext {
             allowance_tracker: AllowanceTracker::new(),
             pomodoro_events: Mutex::new(Vec::new()),
             system,
+            clock: Arc::new(SystemClock),
         }
+    }
+
+    /// Build a context whose commands read time from `clock`.
+    pub fn new_with_clock(
+        engine: BlockEngine,
+        system: Arc<dyn SystemSync>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            engine: Mutex::new(engine),
+            allowance_tracker: AllowanceTracker::new(),
+            pomodoro_events: Mutex::new(Vec::new()),
+            system,
+            clock,
+        }
+    }
+
+    pub fn now(&self) -> DateTime<Utc> {
+        self.clock.now()
+    }
+
+    pub fn clock(&self) -> Arc<dyn Clock> {
+        Arc::clone(&self.clock)
     }
 
     /// Build a context that performs no system-level side effects.

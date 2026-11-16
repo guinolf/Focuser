@@ -184,6 +184,7 @@ export async function sendAllowanceTick(
   source: string,
   url?: string,
   sharedOnly = false,
+  focus?: { windowFocused: boolean; idleSecs: number },
 ): Promise<void> {
   try {
     await fetch(`${API_BASE}/api/allowance-tick`, {
@@ -193,6 +194,8 @@ export async function sendAllowanceTick(
         hostname,
         app_exe: null,
         active: true,
+        window_focused: focus?.windowFocused ?? null,
+        idle_secs: focus?.idleSecs ?? null,
         source,
         increment_secs: incrementSecs,
         url: url ?? null,

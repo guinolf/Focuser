@@ -36,6 +36,12 @@ fn every_error_code_has_a_message_or_is_deliberately_raw() {
         CommandError::AllowanceNotFound(EntityId::nil()),
         CommandError::Protected,
         CommandError::WrongUnlockResponse,
+        CommandError::UnlockNotReady {
+            remaining_secs: 600,
+        },
+        CommandError::UnlockRateLimited {
+            retry_after_secs: 60,
+        },
         CommandError::Validation("x".into()),
         CommandError::Unsupported,
     ];
@@ -64,6 +70,8 @@ fn the_variant_list_above_is_complete() {
             CommandError::AllowanceNotFound(_) => "allowance_not_found",
             CommandError::Protected => "protected",
             CommandError::WrongUnlockResponse => "wrong_unlock_response",
+            CommandError::UnlockNotReady { .. } => "unlock_not_ready",
+            CommandError::UnlockRateLimited { .. } => "unlock_rate_limited",
             CommandError::Validation(_) => "validation",
             CommandError::Unsupported => "unsupported",
             CommandError::Core(_) => "core",

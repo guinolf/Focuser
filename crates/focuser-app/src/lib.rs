@@ -16,6 +16,6 @@ pub mod error;
 pub mod execute;
 
 pub use command::{Command, CommandResult};
-pub use context::{AppContext, NoopSync, PomodoroEvent, SystemSync};
+pub use context::{AppContext, Clock, NoopSync, PomodoroEvent, SystemClock, SystemSync};
 pub use error::{CommandError, CommandErrorPayload, CommandOutcome};
 pub use execute::execute;

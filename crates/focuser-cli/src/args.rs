@@ -570,6 +570,7 @@ impl TopLevel {
                     prevent_uninstall: !allow_uninstall,
                     prevent_service_stop: !allow_service_stop,
                     prevent_modification: !allow_modification,
+                    preset: None,
                     lock: match (password, random_text_length) {
                         (Some(password), _) => Some(LockSetup::Password {
                             password: match password {
