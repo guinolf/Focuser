@@ -1,4 +1,5 @@
 import {
+  Activity,
   AppWindow,
   BarChart3,
   CalendarClock,
@@ -7,6 +8,8 @@ import {
   LayoutDashboard,
   ListChecks,
   Settings,
+  ShieldCheck,
+  Trophy,
 } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { BlockingHealthBanner } from "@/components/blocking-health-banner";
@@ -24,6 +27,10 @@ import { m } from "@/paraglide/messages.js";
 // freeze the locale that was active when this file was imported.
 const NAV = [
   { to: "/", label: m.nav_dashboard, icon: LayoutDashboard, end: true },
+  { to: "/plans", label: m.nav_plans, icon: CalendarClock },
+  { to: "/activity", label: m.nav_activity, icon: Activity },
+  { to: "/evolution", label: m.nav_evolution, icon: Trophy },
+  { to: "/protection", label: m.nav_protection, icon: ShieldCheck },
   { to: "/block-lists", label: m.nav_block_lists, icon: ListChecks },
   { to: "/websites", label: m.nav_websites, icon: Globe },
   { to: "/apps", label: m.nav_applications, icon: AppWindow },

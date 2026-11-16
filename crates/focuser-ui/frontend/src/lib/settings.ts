@@ -14,6 +14,7 @@ export const SETTING_KEYS = {
   extensionGracePeriod: "extension_grace_period",
   spareAutomationBrowsers: "spare_automation_browsers",
   guardExtensionsPage: "guard_extensions_page",
+  activityCollection: "activity_collection",
   language: "language",
   phaseSound: "pomodoro_sound",
   phaseSoundVolume: "pomodoro_sound_volume",

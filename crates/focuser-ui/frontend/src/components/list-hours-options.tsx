@@ -26,6 +26,7 @@ import {
   useScheduledProtectionStatus,
   useSharedAllowanceStatus,
 } from "@/lib/commands";
+import { CHALLENGE_LENGTH } from "@/lib/protection";
 import { hasEndingHours, summarizeWeek } from "@/lib/schedule";
 import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages.js";
@@ -81,7 +82,7 @@ function ScheduledLockRow({ list, page, hours, locked }: RowProps & { page: Page
   const method = !lock
     ? m.schedule_lock_none_summary()
     : lock.RandomText
-      ? m.schedule_lock_random_summary({ count: lock.RandomText.length })
+      ? m.schedule_lock_random_summary({ count: CHALLENGE_LENGTH })
       : m.lists_lock_kind_password();
 
   return (

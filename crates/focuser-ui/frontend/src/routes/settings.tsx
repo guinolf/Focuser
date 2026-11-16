@@ -16,10 +16,12 @@ import { Switch } from "@/components/ui/switch";
 import { UpdateCheck } from "@/components/update-check";
 import { useAutostart } from "@/lib/autostart";
 import {
+  useActivityRetention,
   useAppVersion,
   useDeleteAllData,
   useProtectionStatus,
   useResetSettings,
+  useSetActivityRetention,
   useSetSetting,
   useSetStatsRetention,
   useSetting,
@@ -41,6 +43,7 @@ export function Settings() {
   const gracePeriod = useNumberSetting(SETTING_KEYS.extensionGracePeriod, 60);
   const spareAutomation = useBooleanSetting(SETTING_KEYS.spareAutomationBrowsers, false);
   const guardExtensions = useBooleanSetting(SETTING_KEYS.guardExtensionsPage, true);
+  const activityCollection = useBooleanSetting(SETTING_KEYS.activityCollection, true);
   const phaseSound = useBooleanSetting(SETTING_KEYS.phaseSound, false);
   const soundVolume = useNumberSetting(SETTING_KEYS.phaseSoundVolume, 70);
   const language = useLanguage();
@@ -56,6 +59,8 @@ export function Settings() {
   const guardLocked = editLocked && guardExtensions.value;
 
   const retention = useStatsRetention();
+  const activityRetention = useActivityRetention();
+  const setActivityRetention = useSetActivityRetention();
   const setRetention = useSetStatsRetention();
   const reset = useResetSettings();
   const deleteAll = useDeleteAllData();
@@ -209,6 +214,37 @@ export function Settings() {
           }
         />
         <SoundFile />
+      </SettingsSection>
+
+      <SettingsSection title={m.settings_section_activity()}>
+        <SettingRow
+          label={m.settings_activity_collection()}
+          description={m.settings_activity_collection_description()}
+          control={
+            <Switch
+              checked={activityCollection.value}
+              onCheckedChange={activityCollection.set}
+              disabled={activityCollection.isPending || activityCollection.isSaving}
+              aria-label={m.settings_activity_collection()}
+            />
+          }
+        />
+        <SettingRow
+          label={m.settings_activity_retention()}
+          htmlFor="activity-retention"
+          description={m.settings_activity_retention_description()}
+          control={
+            <NumberField
+              id="activity-retention"
+              value={activityRetention.data ?? 90}
+              onCommit={(days) => setActivityRetention.mutate(days)}
+              min={1}
+              max={MAX_RETENTION_DAYS}
+              suffix={m.settings_days_suffix()}
+              disabled={activityRetention.isPending}
+            />
+          }
+        />
       </SettingsSection>
 
       <SettingsSection title={m.settings_section_data()}>

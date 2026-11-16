@@ -21,11 +21,14 @@ use crate::AppState;
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
 const IDLE_THRESHOLD_SECS: u32 = 60;
 const TICK_SOURCE: &str = "foreground-watcher";
+/// Retention is enforced periodically, not only when the setting changes.
+const RETENTION_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Spawn the watcher loop. Runs forever; never returns under normal use.
 pub fn run_foreground_watcher(state: Arc<AppState>) {
     info!("Foreground app watcher started");
     let mut last_tick = Instant::now();
+    let mut last_retention = Instant::now() - RETENTION_INTERVAL;
     let mut previous_exe: Option<String> = None;
 
     loop {
@@ -35,11 +38,24 @@ pub fn run_foreground_watcher(state: Arc<AppState>) {
         let elapsed = now.duration_since(last_tick).as_secs() as u32;
         last_tick = now;
 
-        // Skip idle users — quota only counts when they're actually present.
-        if user_idle_seconds().unwrap_or(0) >= IDLE_THRESHOLD_SECS {
-            previous_exe = None;
-            continue;
+        if now.duration_since(last_retention) >= RETENTION_INTERVAL {
+            last_retention = now;
+            if let Ok(eng) = state.engine.lock() {
+                match focuser_core::activity::apply_retention(eng.db()) {
+                    Ok(removed) if removed > 0 => {
+                        debug!(removed, "activity retention applied");
+                    }
+                    Ok(_) => {}
+                    Err(error) => debug!(%error, "activity retention failed"),
+                }
+            }
         }
+
+        // Idle time is still foreground time: record it instead of skipping,
+        // so the Activity page can tell "at the keyboard" from "left open".
+        // Allowance strict mode ignores non-human ticks on its own.
+        let idle_secs = user_idle_seconds();
+        let human = idle_secs.unwrap_or(0) < IDLE_THRESHOLD_SECS;
 
         let Some(sample) = foreground_app() else {
             previous_exe = None;
@@ -59,16 +75,21 @@ pub fn run_foreground_watcher(state: Arc<AppState>) {
             shared_only: false,
             hostname: None,
             app_exe: Some(sample.exe_name.clone()),
-            active: true,
+            active: human,
+            window_focused: Some(true),
+            idle_secs,
             source: TICK_SOURCE.into(),
             increment_secs: Some(elapsed.clamp(1, 60)),
         };
         previous_exe = Some(sample.exe_name.clone());
 
-        if let Ok(eng) = state.engine.lock()
-            && let Err(e) = state.allowance_tracker.ingest_tick(eng.db(), &tick)
-        {
-            debug!(error = %e, app = %sample.exe_name, "ingest_tick failed");
+        if let Ok(eng) = state.engine.lock() {
+            if let Err(e) = state.allowance_tracker.ingest_tick(eng.db(), &tick) {
+                debug!(error = %e, app = %sample.exe_name, "ingest_tick failed");
+            }
+            if let Err(e) = focuser_core::activity::record_tick(eng.db(), &tick) {
+                debug!(error = %e, app = %sample.exe_name, "activity sample failed");
+            }
         }
     }
 }

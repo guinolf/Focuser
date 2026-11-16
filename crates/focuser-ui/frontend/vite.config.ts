@@ -50,6 +50,15 @@ export default defineConfig({
   // Tauri injects TAURI_ENV_* and expects them readable from the frontend.
   envPrefix: ["VITE_", "TAURI_ENV_*"],
 
+  test: {
+    // The heaviest screens (two pages rendered side by side) can take longer
+    // than Vitest's 20 s default on a busy machine. The per-wait timeout in
+    // `src/test/setup.ts` reports a screen that never rendered; this one is
+    // only the backstop for a test that is genuinely stuck.
+    testTimeout: 30_000,
+    hookTimeout: 30_000,
+  },
+
   build: {
     // The webview version is known per platform, so we can target it directly
     // rather than shipping downlevel output.

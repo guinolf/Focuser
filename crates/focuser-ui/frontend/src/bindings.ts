@@ -18,6 +18,95 @@ export const commands = {
 };
 
 /* Types */
+/**  Time inside one local day. */
+export type ActivityDay = {
+	date: string,
+	foreground_secs: number,
+	interaction_secs: number,
+	idle_secs: number,
+};
+
+/**  Health of the collectors, separate from the numbers. */
+export type ActivityHealth = {
+	app_usage_measurable: boolean,
+	extension_connected: boolean,
+	collection_enabled: boolean,
+	total_sample_rows: number,
+	last_sample_at: string | null,
+	/**
+	 *  Minimum foreground time that would be recorded for a day, used by the
+	 *  UI to explain when a range is too old for the retention window.
+	 */
+	retention_days: number,
+};
+
+/**
+ *  Why the page has, or has not, got numbers to show.
+ * 
+ *  Four distinct situations that used to look identical ("0s"):
+ *  the platform cannot measure, the user disabled the collector, the collector
+ *  is running but has not written anything yet, and there is data.
+ */
+export type ActivityMeasurement = 
+/**  No source capable of reporting is available on this machine. */
+"unavailable" | 
+/**  The user turned activity collection off; zero is a choice, not a gap. */
+"disabled" | 
+/**  Sources are available, but nothing has ever been recorded. */
+"awaiting_data" | 
+/**  Data exists in the database, just not in the requested range. */
+"nothing_in_range" | 
+/**  Data exists for the requested range. */
+"recorded";
+
+/**  Everything the Activity page needs for one range. */
+export type ActivityOverview = {
+	from: string,
+	to: string,
+	measurement: ActivityMeasurement,
+	/**
+	 *  Foreground seconds, de-duplicated across sources per bucket: one minute
+	 *  cannot be counted twice just because a browser and its process both
+	 *  reported it.
+	 */
+	foreground_secs: number,
+	interaction_secs: number,
+	idle_secs: number,
+	/**  Targets with any foreground time in the range. */
+	active_targets: number,
+	/**
+	 *  Rows in the whole database, used to tell "not collecting" apart from
+	 *  "nothing in this range".
+	 */
+	total_sample_rows: number,
+	last_sample_at: string | null,
+	days: ActivityDay[],
+	targets: ActivityTarget[],
+	/**  Whether the browser extension checked in recently. */
+	extension_connected: boolean,
+	/**  Whether this platform exposes the foreground window. */
+	app_usage_measurable: boolean,
+	/**  Whether the foreground watcher has been configured off. */
+	collection_enabled: boolean,
+};
+
+/**  Where a sample came from. */
+export type ActivitySource = 
+/**  The foreground-window watcher: `target` is the executable name. */
+"foreground_app" | 
+/**  The browser extension: `target` is the hostname of the active tab. */
+"browser_tab";
+
+/**  Per-target totals for the range. */
+export type ActivityTarget = {
+	target: string,
+	source: ActivitySource,
+	foreground_secs: number,
+	interaction_secs: number,
+	idle_secs: number,
+	last_seen: string,
+};
+
 /**  A user-configured daily time budget for a domain or app. */
 export type Allowance = {
 	id: string,
@@ -118,6 +207,11 @@ export type BlockList = {
 	breaks: BreakConfig | null,
 	/**  Optional shared budget per merged weekly schedule occurrence. */
 	shared_allowance?: SharedAllowanceConfig | null,
+	/**
+	 *  How this list is meant to be used. Absent on databases written before
+	 *  plans existed, which is exactly the old behaviour: a plain block.
+	 */
+	plan?: Plan | null,
 	created_at: string,
 	updated_at: string,
 };
@@ -191,6 +285,28 @@ export type BrowserStatus = {
 	store_url: string,
 	/**  Short name for launching this browser at a URL. */
 	launch_name: string,
+};
+
+export type ChecklistItem = {
+	id: string,
+	text: string,
+	done: boolean,
+};
+
+export type CoachAction = { kind: "create_allowance"; hostname: string; minutes: number } | { kind: "add_website_rule"; block_list_id: string; hostname: string } | { kind: "open_plans" } | { kind: "adjust_screen_break"; work_minutes: number; break_minutes: number } | { kind: "archive_goal"; goal_id: string };
+
+/**
+ *  A deterministic observation. `evidence` is shown verbatim so the user can
+ *  judge the claim instead of trusting a black box.
+ */
+export type CoachInsight = {
+	id: string,
+	title: string,
+	body: string,
+	evidence: string[],
+	severity: NotificationPriority,
+	/**  A concrete command the UI can offer, when one applies. */
+	action?: CoachAction | null,
 };
 
 /**
@@ -293,6 +409,51 @@ export type Command =
  */
 { cmd: "set_stats_retention"; args: {
 	days: number,
+} } | 
+/**
+ *  Measured foreground/interaction/idle time, with an explicit reason when
+ *  there is nothing to show instead of a misleading zero.
+ */
+{ cmd: "get_activity_overview"; args: {
+	from: string,
+	to: string,
+} } | { cmd: "get_activity_health" } | 
+/**  Delete every activity sample and visit. Block lists are preserved. */
+{ cmd: "clear_activity" } | { cmd: "get_activity_retention" } | { cmd: "set_activity_retention"; args: {
+	days: number,
+} } | 
+/**
+ *  Attach (or replace) a plan on a list. Refused while the list's lock
+ *  would be loosened by the change.
+ */
+{ cmd: "set_plan"; args: {
+	list_id: string,
+	plan: Plan | null,
+} } | { cmd: "get_plan_runtimes" } | { cmd: "start_plan_pause"; args: {
+	list_id: string,
+} } | { cmd: "end_plan_pause"; args: {
+	list_id: string,
+} } | 
+/**  Arm a list outside its schedule for a bounded window. */
+{ cmd: "start_quick_timer"; args: {
+	list_id: string,
+	minutes: number,
+} } | { cmd: "cancel_quick_timer"; args: {
+	list_id: string,
+} } | { cmd: "get_protection_policy"; args: {
+	list_id: string,
+} } | 
+/**
+ *  Change a list's protection policy. While the list is protected the
+ *  change must be a tightening; loosening needs the list unlocked.
+ */
+{ cmd: "set_protection_policy"; args: {
+	list_id: string,
+	policy: ProtectionPolicy,
+} } | 
+/**  Current wait/attempt state for a protected list. */
+{ cmd: "get_unlock_status"; args: {
+	list_id: string,
 } } | { cmd: "enable_protection"; args: {
 	list_id: string,
 	/**
@@ -308,6 +469,11 @@ export type Command =
 	 *  pure-commitment mode where nothing can end it before it expires.
 	 */
 	lock: LockSetup | null,
+	/**
+	 *  Named profile whose wait and guards seed the policy. Omitted by
+	 *  older clients, which get the default (Firm).
+	 */
+	preset?: ProtectionPreset | null,
 } } | { cmd: "configure_scheduled_protection"; args: {
 	list_id: string,
 	enabled: boolean,
@@ -334,6 +500,41 @@ export type Command =
 { cmd: "unlock_protection"; args: {
 	list_id: string,
 	response: string,
+} } | { cmd: "get_goals"; args: {
+	include_archived: boolean,
+} } | 
+/**  Active goals with the value measured for the current period. */
+{ cmd: "get_goal_progress" } | 
+/**  Create or update a goal by id. */
+{ cmd: "save_goal"; args: {
+	goal: Goal,
+} } | { cmd: "delete_goal"; args: {
+	id: string,
+} } | { cmd: "get_tasks"; args: {
+	goal_id: string | null,
+	include_done: boolean,
+} } | 
+/**  Create or update a task by id. */
+{ cmd: "save_task"; args: {
+	task: Task,
+} } | { cmd: "delete_task"; args: {
+	id: string,
+} } | { cmd: "get_notifications"; args: {
+	limit: number,
+	unread_only: boolean,
+} } | { cmd: "mark_notification_read"; args: {
+	id: number,
+} } | { cmd: "mark_all_notifications_read" } | { cmd: "clear_notifications" } | 
+/**  Deterministic local insights derived from measured activity. */
+{ cmd: "get_coach_insights" } | { cmd: "start_focus_session"; args: {
+	label: string,
+	goal_id: string | null,
+	task_id: string | null,
+} } | { cmd: "finish_focus_session"; args: {
+	id: string,
+} } | { cmd: "get_focus_sessions"; args: {
+	from: string,
+	to: string,
 } } | { cmd: "get_setting"; args: {
 	key: string,
 	default: string | null,
@@ -449,7 +650,7 @@ export type CommandResult =
 /**  Succeeded, nothing to return. */
 { kind: "unit" } | { kind: "block_list"; data: BlockList } | { kind: "block_lists"; data: BlockList[] } | { kind: "website_rule"; data: WebsiteRule } | { kind: "app_rule"; data: AppRule } | { kind: "exception"; data: ExceptionRule } | 
 /**  A number of affected items — e.g. rules imported or cleared. */
-{ kind: "count"; data: number } | { kind: "stats"; data: UsageStat[] } | { kind: "blocked_events"; data: BlockedEvent[] } | { kind: "protection_status"; data: ProtectionInfo[] } | { kind: "scheduled_protection_status"; data: ScheduledProtectionStatus[] } | { kind: "shared_allowance_status"; data: SharedAllowanceStatus[] } | { kind: "blocking_health"; data: BlockingHealth } | 
+{ kind: "count"; data: number } | { kind: "stats"; data: UsageStat[] } | { kind: "blocked_events"; data: BlockedEvent[] } | { kind: "protection_status"; data: ProtectionInfo[] } | { kind: "scheduled_protection_status"; data: ScheduledProtectionStatus[] } | { kind: "shared_allowance_status"; data: SharedAllowanceStatus[] } | { kind: "blocking_health"; data: BlockingHealth } | { kind: "activity"; data: ActivityOverview } | { kind: "activity_health"; data: ActivityHealth } | { kind: "plan_runtimes"; data: PlanRuntime[] } | { kind: "protection_policy"; data: ProtectionPolicy } | { kind: "unlock_status"; data: UnlockStatus } | { kind: "unlock_challenge"; data: UnlockChallenge } | { kind: "goals"; data: Goal[] } | { kind: "goal_progress"; data: GoalProgress[] } | { kind: "goal"; data: Goal } | { kind: "tasks"; data: Task[] } | { kind: "task"; data: Task } | { kind: "notifications"; data: Notification[] } | { kind: "coach_insights"; data: CoachInsight[] } | { kind: "focus_sessions"; data: FocusSession[] } | { kind: "focus_session"; data: FocusSession } | 
 /**  A setting value; `None` when unset and no default was supplied. */
 { kind: "setting"; data: string | null } | 
 /**  A yes/no outcome — e.g. "was a session actually paused". */
@@ -477,6 +678,80 @@ export type ExceptionType =
 ({ Wildcard: string }) & { Domain?: never; UrlPath?: never } | 
 /**  Allow local file:// URLs */
 "LocalFiles";
+
+/**  A completed stretch of focused work, linked to a task or goal. */
+export type FocusSession = {
+	id: string,
+	started_at: string,
+	ended_at?: string | null,
+	planned_secs?: number,
+	focused_secs: number,
+	task_id?: string | null,
+	goal_id?: string | null,
+	block_list_id?: string | null,
+	/**
+	 *  `quick` for the timer, `pomodoro` for a Pomodoro work phase, `manual`
+	 *  for a session started by hand.
+	 */
+	source: string,
+	/**  What the user was focusing on; free text, shown in history. */
+	label?: string,
+};
+
+export type Goal = {
+	id: string,
+	title: string,
+	notes?: string,
+	kind: GoalKind,
+	period: GoalPeriod,
+	/**
+	 *  Minutes for `Time`, session count for `Sessions`, task count for
+	 *  `Result`. Always an absolute number, never a percentage.
+	 */
+	target_value: number,
+	/**  The plan whose targets supply `Time` progress, when set. */
+	block_list_id?: string | null,
+	state: GoalState,
+	deadline?: string | null,
+	created_at: string,
+	updated_at: string,
+	completed_at?: string | null,
+};
+
+/**  What a goal measures. */
+export type GoalKind = 
+/**  Foreground time on the goal's linked plan targets. */
+"time" | 
+/**  Completed focus sessions linked to the goal. */
+"sessions" | 
+/**
+ *  Outcome: the fraction of linked tasks completed. Progress is real
+ *  task state, but completion is always confirmed by the user.
+ */
+"result";
+
+/**  The window a goal resets on. */
+export type GoalPeriod = "day" | "week" | "month" | "once";
+
+/**  A goal plus its measured progress. */
+export type GoalProgress = {
+	goal: Goal,
+	/**
+	 *  Units depend on `goal.kind`: seconds for Time, sessions for Sessions,
+	 *  completed tasks for Result.
+	 */
+	current: number,
+	target: number,
+	percent: number,
+	period_start: string,
+	/**
+	 *  True when the measured value reached the target. Result goals still
+	 *  need an explicit confirmation before they are marked completed.
+	 */
+	reached: boolean,
+};
+
+export type GoalState = "active" | "completed" | "archived";
 
 /**
  *  How a protection window can be ended early — Cold Turkey calls this a
@@ -528,6 +803,100 @@ export type LockSetup =
  *  back exactly, to end the window early.
  */
 { kind: "random_text"; length: number };
+
+export type Notification = {
+	id: number,
+	kind: NotificationKind,
+	priority: NotificationPriority,
+	title: string,
+	body: string,
+	created_at: string,
+	read_at?: string | null,
+	/**  Stable key used to avoid repeating the same reminder over and over. */
+	dedupe_key?: string | null,
+};
+
+export type NotificationKind = "break_due" | "quick_timer_ended" | "goal_reached" | "goal_behind" | "allowance_warning" | "allowance_exhausted" | "blocking_health" | "coach_tip" | "unlock_ready";
+
+export type NotificationPriority = "low" | "normal" | "high";
+
+/**  A bounded pause: the pressure valve every commitment system needs. */
+export type PausePolicy = {
+	/**  Pauses allowed per local day. Zero disables pausing entirely. */
+	allowed_per_day: number,
+	/**  How long one pause lasts. */
+	duration_minutes: number,
+	/**  Minimum time between the end of one pause and the start of the next. */
+	min_gap_minutes: number,
+};
+
+/**
+ *  A plan attached to a block list.
+ * 
+ *  Every field is optional except the mode, so an old database (which has no
+ *  plan) deserialises into "no plan" and behaves exactly as before.
+ */
+export type Plan = {
+	mode?: PlanMode,
+	/**
+	 *  A one-off focus window. While it runs the plan is armed even if its
+	 *  schedule says otherwise; it never overrides protection.
+	 */
+	quick_timer_ends_at?: string | null,
+	pauses?: PausePolicy | null,
+	time_limit?: TimeLimit | null,
+	session_limit?: SessionLimit | null,
+	screen_break?: ScreenBreak | null,
+	time_goal?: TimeGoal | null,
+};
+
+/**  What kind of plan a list is. */
+export type PlanMode = 
+/**  The classic list: armed means its rules block. */
+"block" | 
+/**  Up to `daily_minutes` of the plan's targets per local day, then block. */
+"time_limit" | 
+/**  Up to `max_sessions` separate visits per local day, then block. */
+"session_limit" | 
+/**  Remind the user to step away; never blocks. */
+"screen_break" | 
+/**  Target amount of foreground time per day; never blocks. */
+"time_goal";
+
+/**  The computed state of one plan, ready to render or enforce. */
+export type PlanRuntime = {
+	block_list_id: string,
+	mode: PlanMode,
+	/**  The list's rules + schedule + quick timer say it is in scope. */
+	armed: boolean,
+	/**  Enforcement is in force right now. */
+	blocking: boolean,
+	/**  A pause is currently postponing enforcement. */
+	paused_until: string | null,
+	quick_timer_ends_at: string | null,
+	/**  Foreground time counted against the plan today. */
+	used_secs: number,
+	limit_secs: number,
+	sessions_used: number,
+	sessions_allowed: number | null,
+	/**  When a screen-break reminder is next due. */
+	break_due_at: string | null,
+	status: PlanStatus,
+};
+
+export type PlanStatus = 
+/**  Enabled but outside its schedule, with no quick timer. */
+"inactive" | 
+/**  Armed and (for blocking modes) enforcing. */
+"active" | 
+/**  Temporarily postponed by a pause. */
+"paused" | 
+/**  Allowance or session cap reached; the plan is blocking. */
+"limit_reached" | 
+/**  A goal-only plan whose target was reached. */
+"goal_reached" | 
+/**  A break-only plan, idle between reminders. */
+"monitoring";
 
 /**  User-editable configuration for a Pomodoro session. */
 export type PomodoroConfig = {
@@ -649,6 +1018,26 @@ export type ProtectionInfo = {
 	expires_at: string | null,
 };
 
+export type ProtectionPolicy = {
+	preset: ProtectionPreset,
+	prevent_uninstall: boolean,
+	prevent_service_stop: boolean,
+	prevent_modification: boolean,
+	wait_secs: number,
+	challenge_len: number,
+	max_attempts_per_hour: number,
+};
+
+/**
+ *  Named profiles shown in the UI. Numbers are part of the contract and are
+ *  asserted in tests.
+ */
+export type ProtectionPreset = 
+/**  A short pause. Still requires the challenge, but releases sooner. */
+"light" | "moderate" | "firm" | 
+/**  No early exit at all beyond waiting out the full hour-long delay. */
+"closed";
+
 /**  Weekly recurring schedule. */
 export type Schedule = {
 	id: string,
@@ -669,6 +1058,17 @@ export type ScheduledProtectionStatus = {
 	state: ScheduledLockState,
 };
 
+export type ScreenBreak = {
+	work_minutes: number,
+	break_minutes: number,
+};
+
+export type SessionLimit = {
+	max_sessions: number,
+	/**  Visits closer together than this belong to the same session. */
+	min_gap_minutes: number,
+};
+
 export type SharedAllowanceConfig = {
 	minutes: number,
 };
@@ -680,11 +1080,77 @@ export type SharedAllowanceStatus = {
 	active: boolean,
 };
 
+export type Task = {
+	id: string,
+	title: string,
+	notes?: string,
+	status?: TaskStatus,
+	priority?: TaskPriority,
+	checklist?: ChecklistItem[],
+	goal_id?: string | null,
+	due_date?: string | null,
+	/**  Minutes the user estimated; shown next to measured focus time. */
+	estimate_minutes?: number | null,
+	created_at: string,
+	updated_at: string,
+	completed_at?: string | null,
+};
+
+export type TaskPriority = "low" | "medium" | "high";
+
+export type TaskStatus = "todo" | "doing" | "done" | "archived";
+
+export type TimeGoal = {
+	daily_minutes: number,
+};
+
+export type TimeLimit = {
+	daily_minutes: number,
+};
+
 /**  A time range on a specific day of the week. */
 export type TimeSlot = {
 	day: string,
 	start: string,
 	end: string,
+};
+
+/**
+ *  A challenge issued together with the moment it becomes usable.
+ * 
+ *  The wait is part of the value, not a UI timer: closing the window, killing
+ *  the process or changing the clock does not shorten it, because the server
+ *  stores `ready_at` and checks it again when the answer arrives.
+ */
+export type UnlockChallenge = {
+	block_list_id: string,
+	/**  The exact text to retype. Deliberately not stored anywhere else. */
+	challenge: string,
+	ready_at: string,
+	/**  Seconds until `ready_at`, at the moment of issue. */
+	wait_secs: number,
+};
+
+export type UnlockState = 
+/**  Nothing asked for. */
+"idle" | 
+/**  The challenge was answered correctly; counting down. */
+"waiting" | 
+/**  The wait elapsed; the unlock can be confirmed. */
+"ready" | 
+/**  Cancelled by the user before it became ready. */
+"cancelled";
+
+/**  What the protection panel shows for one list. */
+export type UnlockStatus = {
+	block_list_id: string,
+	state: UnlockState,
+	requested_at?: string | null,
+	ready_at?: string | null,
+	remaining_secs: number,
+	attempts_remaining: number,
+	locked_out_until?: string | null,
+	challenge_len: number,
 };
 
 export type UsageStat = {

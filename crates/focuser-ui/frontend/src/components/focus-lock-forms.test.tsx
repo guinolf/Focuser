@@ -18,7 +18,16 @@ beforeEach(() => {
   challenge = "AbcDef";
   rejectNext = false;
   send.mockImplementation(async (command: Command): Promise<CommandResult> => {
-    if (command.cmd === "request_unlock_challenge") return { kind: "text", data: challenge };
+    if (command.cmd === "request_unlock_challenge")
+      return {
+        kind: "unlock_challenge",
+        data: {
+          block_list_id: "list-1",
+          challenge,
+          ready_at: new Date(Date.now() - 1000).toISOString(),
+          wait_secs: 0,
+        },
+      };
     if (command.cmd === "unlock_protection") {
       if (rejectNext) {
         rejectNext = false;
@@ -209,4 +218,22 @@ it("colors only the correct prefix and first mismatch, updating as corrected", a
   for (const character of characters().slice(0, 4)) expect(character).toHaveClass("text-success");
   for (const character of characters().slice(4)) expect(character).not.toHaveAttribute("class");
   expect(screen.queryByRole("status")).toBeNull();
+});
+
+it("refuses paste and drop on the challenge", async () => {
+  const { input } = await show();
+  const clipboard = { getData: () => challenge };
+
+  // `fireEvent` returns false when the handler prevented the default.
+  expect(fireEvent.paste(input, { clipboardData: clipboard })).toBe(false);
+  expect(fireEvent.drop(input, { dataTransfer: clipboard })).toBe(false);
+  expect(input).toHaveValue("");
+});
+
+it("leaves paste and drop alone on password entry", async () => {
+  const { input } = await show(true);
+  const clipboard = { getData: () => "a password" };
+
+  expect(fireEvent.paste(input, { clipboardData: clipboard })).toBe(true);
+  expect(fireEvent.drop(input, { dataTransfer: clipboard })).toBe(true);
 });

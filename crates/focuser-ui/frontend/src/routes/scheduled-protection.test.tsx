@@ -158,7 +158,15 @@ beforeEach(() => {
         return { kind: "unit" };
       }
       case "request_unlock_challenge":
-        return { kind: "text", data: "abcdef" };
+        return {
+          kind: "unlock_challenge",
+          data: {
+            block_list_id: "list-1",
+            challenge: "abcdef",
+            ready_at: new Date(Date.now() - 1000).toISOString(),
+            wait_secs: 0,
+          },
+        };
       case "unlock_protection":
         state = "unlocked_for_editing";
         return { kind: "unit" };
@@ -336,9 +344,9 @@ describe.each(["lists", "schedule"])("turning the lock on from %s", (name) => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(send).toHaveBeenCalledWith({
       cmd: "configure_scheduled_protection",
-      args: { list_id: "list-1", enabled: true, lock: { kind: "random_text", length: 16 } },
+      args: { list_id: "list-1", enabled: true, lock: { kind: "random_text", length: 20 } },
     });
-    expect(page(name).getByText("Random text · 16 characters")).toBeVisible();
+    expect(page(name).getByText("Random text · 20 characters")).toBeVisible();
     expect(page(name).getByText("Locks when the schedule starts")).toBeVisible();
   });
 
@@ -397,19 +405,17 @@ describe("the unlock method", () => {
     );
   });
 
-  it("can be changed later, from the same pop-up, while the list is not locked", async () => {
+  it("keeps the fixed challenge when reopened, without a length knob", async () => {
     stored.scheduled_protection = { lock: { RandomText: { length: 16 } } };
     state = "unlocked_for_editing";
     show(<BlockLists />);
 
     fireEvent.click(await screen.findByRole("button", { name: "Change unlock method" }));
-    const length = dialog().getByRole("spinbutton", { name: "Challenge length" });
-    fireEvent.change(length, { target: { value: "48" } });
-    fireEvent.blur(length);
+    expect(dialog().queryByRole("spinbutton", { name: "Challenge length" })).toBeNull();
     fireEvent.click(dialog().getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
-      expect(stored.scheduled_protection).toEqual({ lock: { RandomText: { length: 48 } } }),
+      expect(stored.scheduled_protection).toEqual({ lock: { RandomText: { length: 20 } } }),
     );
     expect(sent("configure_scheduled_protection").every(([c]) => c.args.enabled)).toBe(true);
   });
@@ -705,6 +711,7 @@ describe("the manual lock", () => {
           prevent_service_stop: true,
           prevent_modification: true,
           lock: null,
+          preset: "firm",
         },
       }),
     );
@@ -723,7 +730,7 @@ describe("the manual lock", () => {
       expect(send).toHaveBeenCalledWith(
         expect.objectContaining({
           cmd: "enable_protection",
-          args: expect.objectContaining({ lock: { kind: "random_text", length: 16 } }),
+          args: expect.objectContaining({ lock: { kind: "random_text", length: 20 } }),
         }),
       ),
     );
@@ -748,7 +755,7 @@ describe("the manual lock", () => {
           cmd: "enable_protection",
           args: expect.objectContaining({
             duration_minutes: null,
-            lock: { kind: "random_text", length: 16 },
+            lock: { kind: "random_text", length: 20 },
           }),
         }),
       ),

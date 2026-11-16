@@ -9,6 +9,8 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  ActivityHealth,
+  ActivityOverview,
   Allowance,
   AllowanceMatch,
   AllowanceStatus,
@@ -16,14 +18,25 @@ import type {
   BlockedEvent,
   BlockList,
   BrowserStatus,
+  CoachInsight,
   Command,
   CommandResult,
   ExceptionType,
+  FocusSession,
+  Goal,
   LockSetup,
+  Notification,
+  Plan,
+  PlanRuntime,
   PomodoroConfig,
   PomodoroStatus,
   ProtectionInfo,
+  ProtectionPolicy,
+  ProtectionPreset,
+  Task,
   TimeSlot,
+  UnlockChallenge,
+  UnlockStatus,
   UsageStat,
   WebsiteMatchType,
   WebsiteRuleKind,
@@ -31,6 +44,8 @@ import type {
 import { send } from "./transport";
 
 export type {
+  ActivityHealth,
+  ActivityOverview,
   Allowance,
   AllowanceMatch,
   AllowanceStatus,
@@ -38,14 +53,25 @@ export type {
   BlockedEvent,
   BlockList,
   BrowserStatus,
+  CoachInsight,
   Command,
   CommandResult,
   ExceptionType,
+  FocusSession,
+  Goal,
   LockSetup,
+  Notification,
+  Plan,
+  PlanRuntime,
   PomodoroConfig,
   PomodoroStatus,
   ProtectionInfo,
+  ProtectionPolicy,
+  ProtectionPreset,
+  Task,
   TimeSlot,
+  UnlockChallenge,
+  UnlockStatus,
   UsageStat,
   WebsiteMatchType,
   WebsiteRuleKind,
@@ -76,6 +102,18 @@ export const queryKeys = {
   stats: (from: string, to: string) => ["stats", from, to] as const,
   events: (from: string, to: string) => ["events", from, to] as const,
   retention: ["stats-retention"] as const,
+  activity: (from: string, to: string) => ["activity", from, to] as const,
+  activityHealth: ["activity-health"] as const,
+  activityRetention: ["activity-retention"] as const,
+  planRuntimes: ["plan-runtimes"] as const,
+  protectionPolicy: (listId: string) => ["protection-policy", listId] as const,
+  unlockStatus: (listId: string) => ["unlock-status", listId] as const,
+  goals: (includeArchived: boolean) => ["goals", includeArchived] as const,
+  goalProgress: ["goal-progress"] as const,
+  tasks: (goalId: string | null, includeDone: boolean) => ["tasks", goalId, includeDone] as const,
+  notifications: (unreadOnly: boolean) => ["notifications", unreadOnly] as const,
+  coach: ["coach"] as const,
+  focusSessions: (from: string, to: string) => ["focus-sessions", from, to] as const,
   browsers: ["browsers"] as const,
   setting: (key: string) => ["setting", key] as const,
   appIcons: (targets: string[]) => ["app-icons", ...targets] as const,
@@ -364,6 +402,8 @@ export const useEnableProtection = () =>
     preventModification: boolean;
     /** `null` means "wait it out" — nothing can end the window early. */
     lock: LockSetup | null;
+    /** Named profile that seeds the policy; omitted means the default. */
+    preset?: ProtectionPreset | null;
   }>((a) => ({
     cmd: "enable_protection",
     args: {
@@ -373,15 +413,18 @@ export const useEnableProtection = () =>
       prevent_service_stop: a.preventServiceStop,
       prevent_modification: a.preventModification,
       lock: a.lock,
+      preset: a.preset ?? null,
     },
   }));
 
-/** Issue a fresh random-text challenge to display and retype. */
+/** Issue (or reuse) a random-text challenge to display and retype. */
 export function useRequestUnlockChallenge() {
   return useMutation({
     mutationFn: async (listId: string) =>
-      expect(await run({ cmd: "request_unlock_challenge", args: { list_id: listId } }), "text")
-        .data,
+      expect(
+        await run({ cmd: "request_unlock_challenge", args: { list_id: listId } }),
+        "unlock_challenge",
+      ).data,
   });
 }
 
@@ -548,3 +591,248 @@ export const useDeleteAllowance = () =>
 
 export const useResetAllowanceToday = () =>
   useAllowanceMutation<string>((id) => ({ cmd: "allowance_reset_today", args: { id } }));
+
+// ─── Activity ───────────────────────────────────────────────────────
+
+export function useActivityOverview(from: string, to: string) {
+  return useQuery({
+    queryKey: queryKeys.activity(from, to),
+    queryFn: async () =>
+      expect(await run({ cmd: "get_activity_overview", args: { from, to } }), "activity").data,
+  });
+}
+
+export function useActivityHealth() {
+  return useQuery({
+    queryKey: queryKeys.activityHealth,
+    queryFn: async () => expect(await run({ cmd: "get_activity_health" }), "activity_health").data,
+    refetchInterval: 5000,
+  });
+}
+
+export function useClearActivity() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => run({ cmd: "clear_activity" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["activity"] }),
+  });
+}
+
+export function useActivityRetention() {
+  return useQuery({
+    queryKey: queryKeys.activityRetention,
+    queryFn: async () => expect(await run({ cmd: "get_activity_retention" }), "count").data,
+  });
+}
+
+export function useSetActivityRetention() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (days: number) => run({ cmd: "set_activity_retention", args: { days } }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.activityRetention });
+      qc.invalidateQueries({ queryKey: ["activity"] });
+    },
+  });
+}
+
+// ─── Plans ──────────────────────────────────────────────────────────
+
+export function usePlanRuntimes() {
+  return useQuery({
+    queryKey: queryKeys.planRuntimes,
+    queryFn: async () => expect(await run({ cmd: "get_plan_runtimes" }), "plan_runtimes").data,
+    refetchInterval: 5000,
+  });
+}
+
+function usePlanMutation<TArgs>(build: (args: TArgs) => Command) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: TArgs) => run(build(args)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.planRuntimes });
+      qc.invalidateQueries({ queryKey: queryKeys.blockLists });
+      qc.invalidateQueries({ queryKey: queryKeys.protection });
+    },
+  });
+}
+
+export const useSetPlan = () =>
+  usePlanMutation<{ listId: string; plan: Plan | null }>((a) => ({
+    cmd: "set_plan",
+    args: { list_id: a.listId, plan: a.plan },
+  }));
+
+export const useStartPlanPause = () =>
+  usePlanMutation<string>((listId) => ({ cmd: "start_plan_pause", args: { list_id: listId } }));
+
+export const useEndPlanPause = () =>
+  usePlanMutation<string>((listId) => ({ cmd: "end_plan_pause", args: { list_id: listId } }));
+
+export const useStartQuickTimer = () =>
+  usePlanMutation<{ listId: string; minutes: number }>((a) => ({
+    cmd: "start_quick_timer",
+    args: { list_id: a.listId, minutes: a.minutes },
+  }));
+
+export const useCancelQuickTimer = () =>
+  usePlanMutation<string>((listId) => ({
+    cmd: "cancel_quick_timer",
+    args: { list_id: listId },
+  }));
+
+// ─── Protection policy ──────────────────────────────────────────────
+
+export function useProtectionPolicy(listId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.protectionPolicy(listId ?? ""),
+    queryFn: async () =>
+      expect(
+        await run({ cmd: "get_protection_policy", args: { list_id: listId ?? "" } }),
+        "protection_policy",
+      ).data,
+    enabled: listId !== null,
+  });
+}
+
+export function useSetProtectionPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (a: { listId: string; policy: ProtectionPolicy }) =>
+      run({ cmd: "set_protection_policy", args: { list_id: a.listId, policy: a.policy } }),
+    onSuccess: (_d, a) => {
+      qc.invalidateQueries({ queryKey: queryKeys.protectionPolicy(a.listId) });
+      qc.invalidateQueries({ queryKey: queryKeys.blockLists });
+    },
+  });
+}
+
+export function useUnlockStatus(listId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.unlockStatus(listId ?? ""),
+    queryFn: async () =>
+      expect(
+        await run({ cmd: "get_unlock_status", args: { list_id: listId ?? "" } }),
+        "unlock_status",
+      ).data,
+    enabled: listId !== null,
+    refetchInterval: 1000,
+  });
+}
+
+// ─── Goals, tasks, notifications, coach ─────────────────────────────
+
+export function useGoals(includeArchived = false) {
+  return useQuery({
+    queryKey: queryKeys.goals(includeArchived),
+    queryFn: async () =>
+      expect(await run({ cmd: "get_goals", args: { include_archived: includeArchived } }), "goals")
+        .data,
+  });
+}
+
+export function useGoalProgress() {
+  return useQuery({
+    queryKey: queryKeys.goalProgress,
+    queryFn: async () => expect(await run({ cmd: "get_goal_progress" }), "goal_progress").data,
+  });
+}
+
+function useProductivityMutation<TArgs>(build: (args: TArgs) => Command) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: TArgs) => run(build(args)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["goals"] });
+      qc.invalidateQueries({ queryKey: queryKeys.goalProgress });
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      qc.invalidateQueries({ queryKey: queryKeys.coach });
+      qc.invalidateQueries({ queryKey: ["focus-sessions"] });
+    },
+  });
+}
+
+export const useSaveGoal = () =>
+  useProductivityMutation<Goal>((goal) => ({ cmd: "save_goal", args: { goal } }));
+
+export const useDeleteGoal = () =>
+  useProductivityMutation<string>((id) => ({ cmd: "delete_goal", args: { id } }));
+
+export function useTasks(goalId: string | null = null, includeDone = false) {
+  return useQuery({
+    queryKey: queryKeys.tasks(goalId, includeDone),
+    queryFn: async () =>
+      expect(
+        await run({ cmd: "get_tasks", args: { goal_id: goalId, include_done: includeDone } }),
+        "tasks",
+      ).data,
+  });
+}
+
+export const useSaveTask = () =>
+  useProductivityMutation<Task>((task) => ({ cmd: "save_task", args: { task } }));
+
+export const useDeleteTask = () =>
+  useProductivityMutation<string>((id) => ({ cmd: "delete_task", args: { id } }));
+
+export function useNotifications(unreadOnly = false) {
+  return useQuery({
+    queryKey: queryKeys.notifications(unreadOnly),
+    queryFn: async () =>
+      expect(
+        await run({ cmd: "get_notifications", args: { limit: 50, unread_only: unreadOnly } }),
+        "notifications",
+      ).data,
+    refetchInterval: 10000,
+  });
+}
+
+export const useMarkNotificationRead = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => run({ cmd: "mark_notification_read", args: { id } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+};
+
+export const useMarkAllNotificationsRead = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => run({ cmd: "mark_all_notifications_read" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+};
+
+export const useClearNotifications = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => run({ cmd: "clear_notifications" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+  });
+};
+
+export function useCoachInsights() {
+  return useQuery({
+    queryKey: queryKeys.coach,
+    queryFn: async () => expect(await run({ cmd: "get_coach_insights" }), "coach_insights").data,
+  });
+}
+
+export function useFocusSessions(from: string, to: string) {
+  return useQuery({
+    queryKey: queryKeys.focusSessions(from, to),
+    queryFn: async () =>
+      expect(await run({ cmd: "get_focus_sessions", args: { from, to } }), "focus_sessions").data,
+  });
+}
+
+export const useStartFocusSession = () =>
+  useProductivityMutation<{ label: string; goalId: string | null; taskId: string | null }>((a) => ({
+    cmd: "start_focus_session",
+    args: { label: a.label, goal_id: a.goalId, task_id: a.taskId },
+  }));
+
+export const useFinishFocusSession = () =>
+  useProductivityMutation<string>((id) => ({ cmd: "finish_focus_session", args: { id } }));

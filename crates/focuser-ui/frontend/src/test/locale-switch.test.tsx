@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { m } from "@/paraglide/messages.js";
 import { baseLocale, getLocale, locales, setLocale } from "@/paraglide/runtime.js";
 
@@ -16,6 +16,7 @@ function Heading() {
 
 describe("switching language", () => {
   beforeEach(() => setLocale(baseLocale, { reload: false }));
+  afterEach(() => setLocale(baseLocale, { reload: false }));
 
   it("ships more than one language", () => {
     expect(locales.length).toBeGreaterThan(1);
@@ -92,6 +93,9 @@ describe("switching language", () => {
           remaining: 1,
           position: 1,
           time: "x",
+          when: "x",
+          days: 1,
+          current: 1,
           hour: "x",
           day: "x",
           path: "x",
@@ -130,6 +134,9 @@ describe("switching language", () => {
           remaining: 1,
           position: 1,
           time: "x",
+          when: "x",
+          days: 1,
+          current: 1,
           hour: "x",
           day: "x",
           path: "x",

@@ -2,7 +2,6 @@ import { Hourglass, Keyboard, KeyRound } from "lucide-react";
 import { type ReactNode, useId } from "react";
 import type { Lock, LockSetup } from "@/bindings";
 import { Input } from "@/components/ui/input";
-import { NumberField } from "@/components/ui/number-field";
 import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages.js";
 
@@ -19,7 +18,7 @@ export interface UnlockMethod {
   confirm: string;
 }
 
-const DEFAULT_LENGTH = 16;
+const DEFAULT_LENGTH = 20;
 
 /**
  * The starting point for a form. `undefined` is a lock that does not exist yet,
@@ -32,7 +31,8 @@ export function methodFromLock(lock: Lock | null | undefined): UnlockMethod {
   const blank = { length: DEFAULT_LENGTH, password: "", confirm: "" };
   if (lock === undefined) return { ...blank, kind: "random_text" };
   if (lock === null) return { ...blank, kind: "none" };
-  if (lock.RandomText) return { ...blank, kind: "random_text", length: lock.RandomText.length };
+  // One length for every typing challenge; the picker is not a knob for it.
+  if (lock.RandomText) return { ...blank, kind: "random_text" };
   return { ...blank, kind: "password" };
 }
 
@@ -124,16 +124,8 @@ export function UnlockMethodPicker({
           "random_text",
           <Keyboard />,
           m.lists_lock_kind_random_text(),
-          <span className="flex items-center gap-2 text-muted-foreground text-xs">
-            <NumberField
-              value={value.length}
-              onCommit={(length) => onChange({ ...value, length })}
-              min={6}
-              max={5000}
-              disabled={disabled}
-              aria-label={m.lists_lock_random_text_length()}
-            />
-            {m.lock_length_unit()}
+          <span className="text-muted-foreground text-xs">
+            {m.protection_challenge_length_fixed()}
           </span>,
         )}
         {option("password", <KeyRound />, m.lists_lock_kind_password())}

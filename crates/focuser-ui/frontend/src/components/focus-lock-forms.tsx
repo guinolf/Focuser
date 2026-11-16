@@ -1,6 +1,6 @@
 import { Lock, Unlock } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
-import type { BlockList, Protection } from "@/bindings";
+import type { BlockList, Protection, ProtectionPreset } from "@/bindings";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Notice } from "@/components/ui/feedback";
@@ -18,7 +18,9 @@ import {
   useRequestUnlockChallenge,
   useUnlockProtection,
 } from "@/lib/commands";
-import { formatDuration } from "@/lib/duration";
+import { formatCountdown, formatDuration } from "@/lib/duration";
+import { PRESETS, presetMeta } from "@/lib/protection";
+import { cn } from "@/lib/utils";
 import { m } from "@/paraglide/messages.js";
 
 /**
@@ -79,6 +81,17 @@ export function ProtectForm({ list, onDone }: { list: BlockList; onDone: () => v
   // A timed lock has always started with no way out. That is what "lock" meant
   // before there were unlock methods, so choosing one stays a deliberate step.
   const [method, setMethod] = useState(() => methodFromLock(null));
+  const [preset, setPreset] = useState<ProtectionPreset>("firm");
+  const meta = presetMeta(preset);
+
+  function choosePreset(next: ProtectionPreset) {
+    const chosen = presetMeta(next);
+    setPreset(next);
+    // The profile seeds the switches; the user can still tighten one by hand.
+    setUninstall(chosen.uninstall);
+    setServiceStop(chosen.serviceStop);
+    setModification(chosen.modification);
+  }
   // With no timer the unlock method is the only way out, so one is required.
   const ready = methodReady(method) && (!untilUnlocked || method.kind !== "none");
 
@@ -109,6 +122,27 @@ export function ProtectForm({ list, onDone }: { list: BlockList; onDone: () => v
         )}
       </div>
 
+      <fieldset className="mt-3">
+        <legend className="text-muted-foreground text-sm">{m.protection_preset()}</legend>
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {PRESETS.map((option) => (
+            <Button
+              key={option.id}
+              type="button"
+              size="sm"
+              variant={preset === option.id ? "soft" : "outline"}
+              aria-pressed={preset === option.id}
+              onClick={() => choosePreset(option.id)}
+            >
+              {option.label()}
+            </Button>
+          ))}
+        </div>
+        <p className="mt-1.5 text-faint-foreground text-xs">
+          {meta.hint()} · {m.protection_wait()}: {formatDuration(meta.waitSecs)}
+        </p>
+      </fieldset>
+
       <div className="mt-3 flex flex-col gap-2">
         <Guard label={m.lists_guard_uninstall()} checked={uninstall} onChange={setUninstall} />
         <Guard label={m.lists_guard_service()} checked={serviceStop} onChange={setServiceStop} />
@@ -137,6 +171,7 @@ export function ProtectForm({ list, onDone }: { list: BlockList; onDone: () => v
                 preventServiceStop: serviceStop,
                 preventModification: modification,
                 lock: toLockSetup(method),
+                preset,
               },
               { onSuccess: onDone },
             )
@@ -159,13 +194,17 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
   const inputId = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [response, setResponse] = useState("");
+  // Ticks once a second so the wait comes from the server's `ready_at`, not
+  // from how long this dialog happened to stay open.
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   const lock = effectiveLock(list);
   const isRandomText = lock !== null && "RandomText" in lock;
-  const challenge = requestChallenge.data;
-  const challengeCharacters = Array.from(challenge ?? "");
-  // Counted once here. Counted inside the loop below it was one pass over the
-  // typed text for every character shown, which is felt at 5000 characters.
+  const challenge = requestChallenge.data?.challenge ?? "";
+  const waitLeft = requestChallenge.data
+    ? Math.max(0, Math.ceil((new Date(requestChallenge.data.ready_at).getTime() - nowMs) / 1000))
+    : 0;
+  const challengeCharacters = Array.from(challenge);
   const typedCount = Array.from(response).length;
   const mismatchIndex =
     isRandomText && challenge
@@ -184,6 +223,13 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
     }
   }, [isRandomText, list.id, requestChallenge.mutate]);
 
+  useEffect(() => {
+    if (!requestChallenge.data) return;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [requestChallenge.data]);
+
   // Typing is all this form is for. A password field can take the cursor as the
   // pop-up opens; a random-text one is disabled until its text arrives.
   useEffect(() => {
@@ -191,7 +237,7 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
   }, [challenge]);
 
   function submit() {
-    if (isRandomText && (!randomTextMatches || unlock.isPending)) return;
+    if (isRandomText && (!randomTextMatches || waitLeft > 0 || unlock.isPending)) return;
     unlock.mutate(
       { listId: list.id, response },
       {
@@ -213,9 +259,9 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
           <p className="mt-2 text-muted-foreground text-sm">
             {m.lists_unlock_random_text_instructions()}
           </p>
-          {requestChallenge.data && (
+          {challenge && (
             <p className="mt-3 max-h-60 select-all overflow-y-auto break-all rounded-md border border-border bg-surface px-3 py-2 font-mono text-base text-foreground tracking-wide">
-              <span className="sr-only select-none">{requestChallenge.data}</span>
+              <span className="sr-only select-none">{challenge}</span>
               <span aria-hidden="true">
                 {challengeCharacters.map((character, index) => (
                   <span
@@ -241,6 +287,13 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
             </p>
           )}
           <Notice error={requestChallenge.error} />
+          {challenge && (
+            <p className={cn("mt-2 text-xs", waitLeft > 0 ? "text-warning" : "text-success")}>
+              {waitLeft > 0
+                ? m.protection_status_waiting({ time: formatCountdown(waitLeft) })
+                : m.protection_status_ready()}
+            </p>
+          )}
         </>
       ) : null}
 
@@ -255,7 +308,7 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
           ref={inputRef}
           data-autofocus
           type={isRandomText ? "text" : "password"}
-          disabled={isRandomText && !requestChallenge.data}
+          disabled={isRandomText && (!challenge || waitLeft > 0)}
           invalid={mismatchIndex !== -1}
           aria-describedby={mismatchIndex !== -1 ? mismatchId : undefined}
           value={response}
@@ -295,7 +348,10 @@ export function UnlockForm({ list, onDone }: { list: BlockList; onDone: () => vo
         </Button>
         <Button
           size="sm"
-          disabled={unlock.isPending || (isRandomText ? !randomTextMatches : response.length === 0)}
+          disabled={
+            unlock.isPending ||
+            (isRandomText ? !randomTextMatches || waitLeft > 0 : response.length === 0)
+          }
           onClick={submit}
         >
           {unlock.isPending ? m.lists_unlocking() : m.lists_unlock_action()}

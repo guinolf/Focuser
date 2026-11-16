@@ -24,25 +24,13 @@ function Harness({ start }: { start?: UnlockMethod }) {
 const sends = () => JSON.parse(screen.getByTestId("sends").textContent ?? "null");
 const ready = () => screen.getByTestId("ready").textContent === "true";
 
-it("starts on a random text of 16 characters", () => {
+it("uses the fixed 20-character challenge with no length knob", () => {
   render(<Harness />);
 
   expect(screen.getByRole("radio", { name: "Type random text" })).toBeChecked();
-  expect(screen.getByRole("spinbutton", { name: "Challenge length" })).toHaveValue(16);
-  expect(sends()).toEqual({ kind: "random_text", length: 16 });
+  expect(screen.queryByRole("spinbutton")).toBeNull();
+  expect(sends()).toEqual({ kind: "random_text", length: 20 });
   expect(ready()).toBe(true);
-});
-
-it("keeps the length inside what the lock accepts", () => {
-  render(<Harness />);
-  const length = screen.getByRole("spinbutton", { name: "Challenge length" });
-
-  expect(length).toHaveAttribute("min", "6");
-  expect(length).toHaveAttribute("max", "5000");
-  fireEvent.change(length, { target: { value: "48" } });
-  fireEvent.blur(length);
-
-  expect(sends()).toEqual({ kind: "random_text", length: 48 });
 });
 
 it("is not ready with a password until both fields match", () => {
@@ -76,9 +64,10 @@ it("sends no lock for not unlocking at all", () => {
   expect(screen.queryByRole("spinbutton")).toBeNull();
 });
 
-it("starts from the method a lock already has", () => {
+it("keeps an existing typing lock on the same fixed challenge", () => {
   render(<Harness start={methodFromLock({ RandomText: { length: 32 } })} />);
-  expect(screen.getByRole("spinbutton", { name: "Challenge length" })).toHaveValue(32);
+  expect(screen.queryByRole("spinbutton")).toBeNull();
+  expect(sends()).toEqual({ kind: "random_text", length: 20 });
 });
 
 it("asks for a saved password again instead of showing it", () => {

@@ -7,10 +7,14 @@ import { Toaster } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "@/index.css";
 import { hostPlatform } from "@/lib/native";
+import { ActivityPage } from "@/routes/activity";
 import { Allowances } from "@/routes/allowances";
 import { Apps } from "@/routes/apps";
 import { BlockLists } from "@/routes/block-lists";
 import { Dashboard } from "@/routes/dashboard";
+import { Evolution } from "@/routes/evolution";
+import { Plans } from "@/routes/plans";
+import { Protection } from "@/routes/protection";
 import { Schedule } from "@/routes/schedule";
 import { Settings } from "@/routes/settings";
 import { Websites } from "@/routes/websites";
@@ -39,6 +43,10 @@ const router = createHashRouter([
     element: <AppLayout />,
     children: [
       { index: true, element: <Dashboard /> },
+      { path: "plans", element: <Plans /> },
+      { path: "activity", element: <ActivityPage /> },
+      { path: "evolution", element: <Evolution /> },
+      { path: "protection", element: <Protection /> },
       { path: "block-lists", element: <BlockLists /> },
       { path: "websites", element: <Websites /> },
       { path: "apps", element: <Apps /> },

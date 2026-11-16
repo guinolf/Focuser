@@ -21,6 +21,8 @@ const BY_CODE: Record<string, () => string> = {
   allowance_not_found: m.error_allowance_not_found,
   protected: m.error_protected,
   wrong_unlock_response: m.error_wrong_unlock_response,
+  unlock_not_ready: m.error_unlock_not_ready,
+  unlock_rate_limited: m.error_unlock_rate_limited,
   unsupported: m.error_unsupported,
   transport: m.error_transport,
 };

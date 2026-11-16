@@ -2,9 +2,12 @@ import "@testing-library/jest-dom/vitest";
 import { configure } from "@testing-library/react";
 import { beforeEach } from "vitest";
 
-// The default second is not enough for a first render on a busy CI runner,
-// and a `findBy` that times out there fails a test that is otherwise right.
-configure({ asyncUtilTimeout: 5000 });
+// The default second is not enough for a first render on a busy runner, and
+// neither is five: the full suite runs several jsdom workers over one small
+// machine, so the heaviest screens can take longer than that to paint. A
+// timeout here means "never rendered", not "slow", so it can be generous
+// without hiding a real failure.
+configure({ asyncUtilTimeout: 15000 });
 
 // jsdom has the <dialog> element but none of its methods. This is the least
 // that lets a component open one: the `open` attribute, and a `close` event.
