@@ -1,6 +1,9 @@
+pub mod activity;
 mod allowance;
 mod migrations;
 mod pomodoro;
+mod productivity;
+mod protection;
 
 use focuser_common::error::{FocuserError, Result};
 use focuser_common::types::{BlockList, BlockedEvent, EntityId, UsageStat};
@@ -481,6 +484,14 @@ impl Database {
             .transaction()
             .map_err(|e| FocuserError::Database(e.to_string()))?;
         for table in [
+            "activity_visits",
+            "activity_samples",
+            "unlock_attempts",
+            "unlock_requests",
+            "notifications",
+            "focus_sessions",
+            "tasks",
+            "goals",
             "statistics",
             "blocked_events",
             "active_blocks",
@@ -706,5 +717,60 @@ mod tests {
                 Some("persisted".into())
             );
         }
+    }
+
+    #[test]
+    fn migrations_are_idempotent_and_leave_every_2_0_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("focuser.db");
+
+        let version_after_first = {
+            let db = Database::open(&path).unwrap();
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT MAX(version) FROM schema_version",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(version_after_first, 14);
+
+        // A second process opening the same file must not try to reapply v1–v14.
+        let db = Database::open(&path).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let versions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(versions, 14);
+
+        for table in [
+            "activity_samples",
+            "activity_visits",
+            "unlock_requests",
+            "unlock_attempts",
+            "notifications",
+            "goals",
+            "tasks",
+            "focus_sessions",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{table} missing after reopening");
+        }
+
+        let completed_at: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'completed_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(completed_at, 1);
     }
 }

@@ -44,7 +44,7 @@ impl BlockList {
             && self.is_effectively_active()
     }
 
-    fn is_excepted_domain(&self, domain: &str) -> bool {
+    pub fn is_excepted_domain(&self, domain: &str) -> bool {
         self.exceptions.iter().any(|exc| {
             if !exc.enabled {
                 return false;

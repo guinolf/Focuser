@@ -390,6 +390,8 @@ mod tests {
             hostname: Some("youtube.com".into()),
             app_exe: None,
             active: true,
+            window_focused: None,
+            idle_secs: None,
             source: "test".into(),
             increment_secs: None,
         };
@@ -414,6 +416,8 @@ mod tests {
             hostname: Some("twitter.com".into()),
             app_exe: None,
             active: false,
+            window_focused: None,
+            idle_secs: None,
             source: "test".into(),
             increment_secs: None,
         };
@@ -435,6 +439,8 @@ mod tests {
             hostname: Some("reddit.com".into()),
             app_exe: None,
             active: true,
+            window_focused: None,
+            idle_secs: None,
             source: "test".into(),
             increment_secs: None,
         };

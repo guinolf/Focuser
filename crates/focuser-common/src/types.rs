@@ -35,6 +35,10 @@ pub struct BlockList {
     /// Optional shared budget per merged weekly schedule occurrence.
     #[serde(default)]
     pub shared_allowance: Option<crate::allowance::SharedAllowanceConfig>,
+    /// How this list is meant to be used. Absent on databases written before
+    /// plans existed, which is exactly the old behaviour: a plain block.
+    #[serde(default)]
+    pub plan: Option<crate::plan::Plan>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -56,6 +60,7 @@ impl BlockList {
             schedule_unlocked_until: None,
             breaks: None,
             shared_allowance: None,
+            plan: None,
             created_at: now,
             updated_at: now,
         }
@@ -74,6 +79,16 @@ impl BlockList {
     pub fn is_effectively_active(&self) -> bool {
         if !self.enabled {
             return false;
+        }
+        // A quick timer is an explicit "now" that outranks the schedule. It
+        // must not outrank protection: protection is checked separately by
+        // every caller and is never bypassed here.
+        if self
+            .plan
+            .as_ref()
+            .is_some_and(|plan| plan.quick_timer_active(Utc::now()))
+        {
+            return true;
         }
         match &self.schedule {
             None => true,

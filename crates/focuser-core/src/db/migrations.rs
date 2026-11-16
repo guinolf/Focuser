@@ -84,6 +84,30 @@ fn add_pomodoro_lock(conn: &Connection) -> Result<()> {
     .map_err(|e| FocuserError::Database(e.to_string()))
 }
 
+/// Tasks gained an explicit completion timestamp so weekly goals can count
+/// only the tasks finished inside their period. Older databases have the
+/// table without the column; a re-run (the shared-allowance test rewinds
+/// `schema_version`) must not fail with a duplicate column.
+fn add_task_completed_at(conn: &Connection) -> Result<()> {
+    let has_column = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'completed_at'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|e| FocuserError::Database(e.to_string()))?
+        > 0;
+    if !has_column {
+        conn.execute_batch("ALTER TABLE tasks ADD COLUMN completed_at TEXT;")
+            .map_err(|e| FocuserError::Database(e.to_string()))?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_completed
+            ON tasks(goal_id, completed_at);",
+    )
+    .map_err(|e| FocuserError::Database(e.to_string()))
+}
+
 /// Run all database migrations.
 pub fn run_all(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -252,6 +276,123 @@ pub fn run_all(conn: &Connection) -> Result<()> {
         (
             "v9: focus sessions locked for a number of rounds",
             Step::Code(add_pomodoro_lock),
+        ),
+        (
+            "v10: activity samples and visits",
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS activity_samples (
+                bucket_start INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                device_id TEXT NOT NULL DEFAULT 'local',
+                foreground_secs INTEGER NOT NULL DEFAULT 0,
+                interaction_secs INTEGER NOT NULL DEFAULT 0,
+                idle_secs INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (bucket_start, source, target, device_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_activity_samples_bucket
+                ON activity_samples(bucket_start);
+            CREATE INDEX IF NOT EXISTS idx_activity_samples_target
+                ON activity_samples(target, bucket_start);
+
+            CREATE TABLE IF NOT EXISTS activity_visits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                at INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                device_id TEXT NOT NULL DEFAULT 'local',
+                UNIQUE(at, source, target, device_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_activity_visits_at
+                ON activity_visits(at);",
+            ),
+        ),
+        (
+            "v11: persistent unlock requests and attempts",
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS unlock_requests (
+                block_list_id TEXT PRIMARY KEY,
+                challenge TEXT NOT NULL,
+                requested_at TEXT NOT NULL,
+                ready_at TEXT NOT NULL,
+                wait_secs INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS unlock_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_list_id TEXT NOT NULL,
+                at TEXT NOT NULL,
+                ok INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_unlock_attempts_list
+                ON unlock_attempts(block_list_id, at);",
+            ),
+        ),
+        (
+            "v12: local notifications",
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                priority TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                read_at TEXT,
+                dedupe_key TEXT
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_dedupe
+                ON notifications(dedupe_key) WHERE dedupe_key IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS idx_notifications_created
+                ON notifications(created_at);",
+            ),
+        ),
+        (
+            "v13: goals, tasks and focus sessions",
+            Step::Sql(
+                "CREATE TABLE IF NOT EXISTS goals (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                state TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_goals_state ON goals(state);
+
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                status TEXT NOT NULL,
+                goal_id TEXT,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+            CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id);
+
+            CREATE TABLE IF NOT EXISTS focus_sessions (
+                id TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                goal_id TEXT,
+                task_id TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_focus_sessions_started
+                ON focus_sessions(started_at);",
+            ),
+        ),
+        (
+            "v14: task completion time",
+            Step::Code(add_task_completed_at),
         ),
     ];
 

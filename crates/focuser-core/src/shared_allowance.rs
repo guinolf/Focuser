@@ -378,6 +378,8 @@ mod tests {
             url: Some(format!("https://{host}/")),
             app_exe: None,
             active: true,
+            window_focused: None,
+            idle_secs: None,
             shared_active: true,
             shared_only: false,
             increment_secs: Some(secs),

@@ -2,6 +2,7 @@ use focuser_common::error::Result;
 use focuser_common::extension::ExtensionRuleSet;
 use focuser_common::host::{hosts_entries, name_patterns};
 use focuser_common::ipc::ProtectionInfo;
+use focuser_common::plan::PlanRuntime;
 use focuser_common::types::{BlockList, EntityId, ExceptionType, WebsiteMatchType};
 use tracing::{debug, info, warn};
 
@@ -16,6 +17,10 @@ pub struct BlockEngine {
     cached_lists: Vec<BlockList>,
     /// The list of a focus session that is locked, and its rounds to go.
     locked_session: Option<(EntityId, u32)>,
+    /// Plan verdicts for the cached lists, refreshed with them. Kept here so
+    /// every caller (extension rules, hosts file, domain checks) sees the same
+    /// decision instead of each re-deriving limits on its own.
+    plan_runtimes: Vec<PlanRuntime>,
 }
 
 impl BlockEngine {
@@ -24,19 +29,69 @@ impl BlockEngine {
         let cached_lists = db.list_block_lists()?;
         let locked_session = locked_session(&db)?;
         info!(count = cached_lists.len(), "Block engine initialized");
-        Ok(Self {
+        let mut engine = Self {
             db,
             cached_lists,
             locked_session,
-        })
+            plan_runtimes: Vec::new(),
+        };
+        engine.refresh_plan_runtimes();
+        Ok(engine)
     }
 
     /// Reload block lists from the database.
     pub fn refresh(&mut self) -> Result<()> {
         self.cached_lists = self.db.list_block_lists()?;
         self.locked_session = locked_session(&self.db)?;
+        self.refresh_plan_runtimes();
         debug!(count = self.cached_lists.len(), "Refreshed block lists");
         Ok(())
+    }
+
+    /// Recompute every plan verdict. A failing plan is treated as blocking:
+    /// an error may not become an accidental bypass.
+    pub fn refresh_plan_runtimes(&mut self) {
+        let now = chrono::Utc::now();
+        self.plan_runtimes = self
+            .cached_lists
+            .iter()
+            .filter(|l| l.plan.is_some())
+            .filter_map(|l| match crate::plans::evaluate(&self.db, l, now) {
+                Ok(rt) => Some(rt),
+                Err(e) => {
+                    warn!(list = %l.name, error = %e, "plan evaluation failed; keeping it blocking");
+                    None
+                }
+            })
+            .collect();
+    }
+
+    /// The current plan verdict for a list, if it has one.
+    pub fn plan_runtimes(&self) -> Vec<PlanRuntime> {
+        self.plan_runtimes.clone()
+    }
+
+    pub fn plan_runtime(&self, id: EntityId) -> Option<&PlanRuntime> {
+        self.plan_runtimes.iter().find(|rt| rt.block_list_id == id)
+    }
+
+    /// Whether the list's plan lets it block right now.
+    ///
+    /// Protection always wins: a pause or a goal-only mode never loosens a
+    /// lock. Lists without a plan keep their historical behaviour.
+    pub fn plan_blocks(&self, list: &BlockList) -> bool {
+        let Some(plan) = list.plan.as_ref() else {
+            return true;
+        };
+        if list.has_active_protection() {
+            return true;
+        }
+        match self.plan_runtime(list.id) {
+            Some(rt) => rt.blocking,
+            // A list with a plan but no verdict (evaluation failed) blocks only
+            // in its blocking modes; goal and break modes still must not block.
+            None => plan.mode.can_block(),
+        }
     }
 
     /// The list of a focus session that is locked, and its rounds to go (#47).
@@ -49,6 +104,7 @@ impl BlockEngine {
     pub fn check_domain(&self, domain: &str) -> Option<&str> {
         for list in &self.cached_lists {
             if list.should_block_domain(domain)
+                && self.plan_blocks(list)
                 && !self.db.shared_permits_at(list, chrono::Local::now())
             {
                 return Some(&list.name);
@@ -67,6 +123,7 @@ impl BlockEngine {
     ) -> Option<&str> {
         for list in &self.cached_lists {
             if list.should_block_app(process_name, exe_path, window_title)
+                && self.plan_blocks(list)
                 && !(focuser_common::session::app_usage_measurable()
                     && self.db.shared_permits_at(list, chrono::Local::now()))
             {
@@ -81,14 +138,14 @@ impl BlockEngine {
     pub fn scheduled_block_on_domain(&self, domain: &str) -> bool {
         self.cached_lists
             .iter()
-            .any(|l| has_hours(l) && l.should_block_domain(domain))
+            .any(|l| has_hours(l) && self.plan_blocks(l) && l.should_block_domain(domain))
     }
 
     /// The app half of [`Self::scheduled_block_on_domain`].
     pub fn scheduled_block_on_app(&self, exe: &str) -> bool {
         self.cached_lists
             .iter()
-            .any(|l| has_hours(l) && l.should_block_app(exe, None, None))
+            .any(|l| has_hours(l) && self.plan_blocks(l) && l.should_block_app(exe, None, None))
     }
 
     pub fn shared_covers_app(&self, exe: &str) -> bool {
@@ -109,7 +166,7 @@ impl BlockEngine {
     pub fn collect_blocked_domains(&self) -> Vec<String> {
         let mut domains = Vec::new();
         for list in &self.cached_lists {
-            if !list.is_effectively_active() {
+            if !list.is_effectively_active() || !self.plan_blocks(list) {
                 continue;
             }
             for rule in &list.websites {
@@ -166,7 +223,7 @@ impl BlockEngine {
                 .any(|l| l.is_modification_protected());
 
         for list in &self.cached_lists {
-            if !list.is_effectively_active() {
+            if !list.is_effectively_active() || !self.plan_blocks(list) {
                 continue;
             }
 
@@ -484,6 +541,99 @@ mod tests {
         db.create_block_list(&games).unwrap();
 
         BlockEngine::new(db).unwrap()
+    }
+
+    fn plan_engine(mode: focuser_common::plan::PlanMode, minutes: u32) -> BlockEngine {
+        use focuser_common::plan::{Plan, TimeLimit};
+        let db = Database::open_in_memory().unwrap();
+        let mut list = BlockList::new("Limited");
+        list.websites.push(WebsiteRule::domain("youtube.com"));
+        let mut plan = Plan::with_mode(mode);
+        if mode == focuser_common::plan::PlanMode::TimeLimit {
+            plan.time_limit = Some(TimeLimit {
+                daily_minutes: minutes,
+            });
+        }
+        list.plan = Some(plan);
+        db.create_block_list(&list).unwrap();
+        BlockEngine::new(db).unwrap()
+    }
+
+    fn spend(engine: &BlockEngine, secs: u32) {
+        let mut tick = focuser_common::activity::ActivityTick {
+            source: focuser_common::activity::ActivitySource::BrowserTab,
+            target: "youtube.com".into(),
+            increment_secs: Some(secs),
+            interaction: true,
+            idle: false,
+            observed_at: Some(chrono::Utc::now()),
+            device_id: Some("test".into()),
+        };
+        tick.normalize();
+        engine.db().record_activity_tick(&tick).unwrap();
+    }
+
+    #[test]
+    fn a_time_limit_blocks_only_after_the_budget_is_spent() {
+        let mut engine = plan_engine(focuser_common::plan::PlanMode::TimeLimit, 1);
+        assert_eq!(engine.check_domain("youtube.com"), None, "budget left");
+        spend(&engine, 60);
+        engine.refresh().unwrap();
+        assert_eq!(engine.check_domain("youtube.com"), Some("Limited"));
+        assert!(engine.collect_blocked_domains().contains(&"youtube.com".to_string()));
+    }
+
+    #[test]
+    fn a_paused_plan_stops_enforcing_but_a_lock_does_not() {
+        let mut engine = plan_engine(focuser_common::plan::PlanMode::Block, 0);
+        let list = engine.block_lists()[0].clone();
+        let mut plan = list.plan.clone().unwrap();
+        plan.pauses = Some(focuser_common::plan::PausePolicy {
+            allowed_per_day: 1,
+            duration_minutes: 5,
+            min_gap_minutes: 0,
+        });
+        let mut list = list;
+        list.plan = Some(plan);
+        engine.db().update_block_list(&list).unwrap();
+        engine.refresh().unwrap();
+        assert_eq!(engine.check_domain("youtube.com"), Some("Limited"));
+        crate::plans::start_pause(engine.db(), &list, chrono::Utc::now()).unwrap();
+        engine.refresh().unwrap();
+        assert_eq!(engine.check_domain("youtube.com"), None, "pause loosens");
+        assert!(!engine
+            .compile_extension_rules()
+            .blocked_domains
+            .contains(&"youtube.com".to_string()));
+
+        // Protection is not something a plan can pause through.
+        let mut locked = list;
+        locked.protection = Some(focuser_common::types::Protection::until_unlocked());
+        locked.lock = Some(focuser_common::types::Lock::RandomText { length: 20 });
+        engine.db().update_block_list(&locked).unwrap();
+        engine.refresh().unwrap();
+        assert_eq!(engine.check_domain("youtube.com"), Some("Limited"));
+    }
+
+    #[test]
+    fn protection_keeps_even_a_reminder_only_plan_blocking() {
+        use focuser_common::plan::PlanMode;
+        use focuser_common::types::{Lock, Protection};
+        let mut engine = plan_engine(PlanMode::ScreenBreak, 0);
+        assert_eq!(engine.check_domain("youtube.com"), None);
+        let mut list = engine.block_lists()[0].clone();
+        list.protection = Some(Protection::until_unlocked());
+        list.lock = Some(Lock::RandomText { length: 20 });
+        engine.db().update_block_list(&list).unwrap();
+        engine.refresh().unwrap();
+        assert_eq!(engine.check_domain("youtube.com"), Some("Limited"));
+    }
+
+    #[test]
+    fn a_screen_break_plan_monitors_without_blocking() {
+        let engine = plan_engine(focuser_common::plan::PlanMode::ScreenBreak, 0);
+        assert_eq!(engine.check_domain("youtube.com"), None);
+        assert!(engine.compile_extension_rules().blocked_domains.is_empty());
     }
 
     #[test]

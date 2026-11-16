@@ -152,4 +152,32 @@ pub struct AllowanceTick {
     /// Clamped to [1, 120] server-side.
     #[serde(default)]
     pub increment_secs: Option<u32>,
+    /// Whether the browser window holding the tab was focused. `None` means an
+    /// old client that cannot report it; see [`AllowanceTick::is_human_use`].
+    #[serde(default)]
+    pub window_focused: Option<bool>,
+    /// How long ago the last input happened, as measured by the client.
+    #[serde(default)]
+    pub idle_secs: Option<u32>,
+}
+
+impl AllowanceTick {
+    /// Seconds this tick may spend from an allowance.
+    pub fn increment(&self) -> u32 {
+        self.increment_secs.unwrap_or(5).clamp(1, 120)
+    }
+
+    /// Whether this interval represents a human looking at the page.
+    ///
+    /// An old client only sends `active`, which it derives from tab
+    /// visibility, so a background window with a visible tab can look active.
+    /// When the client reports focus and idle time we use them; when it does
+    /// not we fall back to `active` and the UI says the measurement is coarse.
+    /// Nothing here can be trusted as proof against a modified client — it only
+    /// prevents accidental over-counting from ordinary multitasking.
+    pub fn is_human_use(&self, idle_threshold: u32) -> bool {
+        self.active
+            && self.window_focused.unwrap_or(true)
+            && self.idle_secs.unwrap_or(0) < idle_threshold
+    }
 }
